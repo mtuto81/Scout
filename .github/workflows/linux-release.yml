@@ -1,0 +1,60 @@
+name: Linux Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+jobs:
+  build-linux:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon-x11-0 libxcb-cursor0 desktop-file-utils
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements-linux.txt
+          python -m pip install pyinstaller
+
+      - name: Validate Python files
+        run: |
+          python -m py_compile agent.py tool_manager.py gui_app.py gui/main_windows.py gui/agent_worker.py build_linux_executable.py install_linux_desktop.py
+
+      - name: Build executable
+        run: |
+          python build_linux_executable.py
+
+      - name: Package executable
+        run: |
+          tar -C dist -czf Scout-linux-x86_64.tar.gz Scout
+          sha256sum Scout-linux-x86_64.tar.gz > Scout-linux-x86_64.tar.gz.sha256
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Scout-linux-x86_64
+          path: |
+            Scout-linux-x86_64.tar.gz
+            Scout-linux-x86_64.tar.gz.sha256
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            Scout-linux-x86_64.tar.gz
+            Scout-linux-x86_64.tar.gz.sha256

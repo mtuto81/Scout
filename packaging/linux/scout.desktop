@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Scout
+GenericName=Linux AI Assistant
+Comment=Scout native Linux IT assistant
+Exec=SCOUT_EXEC_PATH
+Icon=applications-system
+Terminal=false
+Categories=Utility;
+StartupNotify=true
+StartupWMClass=Scout

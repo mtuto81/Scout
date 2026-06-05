@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_DIR="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+cd "$PROJECT_DIR"
+
+if [[ -x "$PROJECT_DIR/.venv/bin/python" ]]; then
+    PYTHON="$PROJECT_DIR/.venv/bin/python"
+elif [[ -x "$PROJECT_DIR/venv/bin/python" ]]; then
+    PYTHON="$PROJECT_DIR/venv/bin/python"
+else
+    PYTHON="${PYTHON:-python}"
+fi
+
+export PYTHONUNBUFFERED=1
+export QT_AUTO_SCREEN_SCALE_FACTOR="${QT_AUTO_SCREEN_SCALE_FACTOR:-1}"
+
+exec "$PYTHON" "$PROJECT_DIR/gui_app.py" "$@"

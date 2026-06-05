@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+.venv/
+venv/
+env/
+
+# Local config and secrets
+.env
+.env.*
+!.env.example
+
+# Logs and local conversation data
+log.json
+log.jsonl
+*.log
+*.sqlite
+*.sqlite3
+
+# PyInstaller output
+build/
+dist/
+*.spec.bak
+
+# Local/editor state
+.idea/
+.vscode/
+.codex/
+.agents/
+
+# Project scratch/backup files
+filename
+agent().py
+
+# OS files
+.DS_Store
+Thumbs.db

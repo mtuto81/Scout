@@ -1,0 +1,118 @@
+# Scout on Linux
+
+Scout is a PySide6 desktop app with the existing async agent as the backend.
+
+## Install Dependencies
+
+Use a virtual environment:
+
+```bash
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-linux.txt
+```
+
+For the online backend, set your API key outside git:
+
+```bash
+export OPENROUTER_API_KEY=your_key_here
+```
+
+For local Ollama:
+
+```bash
+export SCOUT_BACKEND=ollama
+```
+
+## Run
+
+```bash
+./scripts/scout
+```
+
+Or directly:
+
+```bash
+python gui_app.py
+```
+
+## Use Ollama Locally
+
+Start Ollama, then run Scout with:
+
+```bash
+SCOUT_BACKEND=ollama ./scripts/scout
+```
+
+The model is controlled by `OLLAMA_MODEL` or `AI_MODEL`.
+
+## Install Desktop Launcher
+
+## Build Linux Executable
+
+Build a Linux executable with PyInstaller:
+
+```bash
+python build_linux_executable.py
+```
+
+Output:
+
+```text
+dist/Scout/Scout
+```
+
+Run it:
+
+```bash
+./dist/Scout/Scout
+```
+
+This executable bundles Python and the project dependencies. The target machine should not need Python installed, but it still needs normal Linux desktop libraries required by Qt.
+
+For distribution, keep the whole folder together:
+
+```text
+dist/Scout/
+  Scout
+  _internal/
+```
+
+To publish on GitHub Releases:
+
+```bash
+tar -C dist -czf Scout-linux-x86_64.tar.gz Scout
+sha256sum Scout-linux-x86_64.tar.gz
+```
+
+The included GitHub Actions workflow can build this archive automatically from a version tag.
+
+Python installer:
+
+```bash
+python install_linux_desktop.py
+```
+
+Shell installer:
+
+```bash
+./scripts/install_linux_desktop.sh
+```
+
+This installs:
+
+```text
+~/.local/share/applications/scout.desktop
+```
+
+Then open Scout from your desktop app menu. On KDE, you can bind a shortcut in:
+
+```text
+System Settings -> Keyboard -> Shortcuts -> Add Application
+```
+
+## Notes
+
+- The launcher runs the repo copy of Scout.
+- If `.venv/bin/python` exists, the launcher uses it.
+- Otherwise it falls back to `python` from your shell path.

@@ -1,0 +1,6 @@
+openai
+PySide6
+psutil
+requests
+markdown
+pypdf
