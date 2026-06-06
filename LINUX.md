@@ -86,6 +86,18 @@ sha256sum Scout-linux-x86_64.tar.gz
 ```
 
 The included GitHub Actions workflow can build this archive automatically from a version tag.
+It also builds:
+
+```text
+Scout-linux-x86_64-installer.run
+```
+
+Users install with:
+
+```bash
+chmod +x Scout-linux-x86_64-installer.run
+./Scout-linux-x86_64-installer.run
+```
 
 ## In-App Updates
 
@@ -104,7 +116,9 @@ The manifest should look like:
   "platform": "linux-x86_64",
   "release_url": "https://github.com/OWNER/REPO/releases/tag/v0.1.0",
   "download_url": "https://github.com/OWNER/REPO/releases/download/v0.1.0/Scout-linux-x86_64.tar.gz",
-  "sha256": "release-archive-sha256"
+  "sha256": "release-archive-sha256",
+  "installer_url": "https://github.com/OWNER/REPO/releases/download/v0.1.0/Scout-linux-x86_64-installer.run",
+  "installer_sha256": "installer-sha256"
 }
 ```
 

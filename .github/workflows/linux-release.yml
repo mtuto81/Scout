@@ -32,7 +32,7 @@ jobs:
 
       - name: Validate Python files
         run: |
-          python -m py_compile agent.py tool_manager.py config.py app_metadata.py gui_app.py gui/main_windows.py gui/agent_worker.py gui/updater.py build_linux_executable.py install_linux_desktop.py
+          python -m py_compile agent.py tool_manager.py config.py app_metadata.py gui_app.py gui/main_windows.py gui/agent_worker.py gui/updater.py build_linux_executable.py install_linux_desktop.py packaging/linux/create_installer.py
 
       - name: Build executable
         run: |
@@ -42,11 +42,15 @@ jobs:
         run: |
           tar -C dist -czf Scout-linux-x86_64.tar.gz Scout
           sha256sum Scout-linux-x86_64.tar.gz > Scout-linux-x86_64.tar.gz.sha256
+          python packaging/linux/create_installer.py Scout-linux-x86_64.tar.gz Scout-linux-x86_64-installer.run
+          sha256sum Scout-linux-x86_64-installer.run > Scout-linux-x86_64-installer.run.sha256
           VERSION="${GITHUB_REF_NAME#v}"
           if [ "$VERSION" = "$GITHUB_REF_NAME" ]; then VERSION="$(cat VERSION)"; fi
           SHA256="$(cut -d ' ' -f 1 Scout-linux-x86_64.tar.gz.sha256)"
+          INSTALLER_SHA256="$(cut -d ' ' -f 1 Scout-linux-x86_64-installer.run.sha256)"
           RELEASE_URL="https://github.com/${GITHUB_REPOSITORY}/releases/tag/v${VERSION}"
           DOWNLOAD_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/Scout-linux-x86_64.tar.gz"
+          INSTALLER_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/v${VERSION}/Scout-linux-x86_64-installer.run"
           python - <<PY
           import json
           data = {
@@ -56,6 +60,8 @@ jobs:
               "release_url": "${RELEASE_URL}",
               "download_url": "${DOWNLOAD_URL}",
               "sha256": "${SHA256}",
+              "installer_url": "${INSTALLER_URL}",
+              "installer_sha256": "${INSTALLER_SHA256}",
           }
           with open("latest.json", "w", encoding="utf-8") as handle:
               json.dump(data, handle, indent=2)
@@ -69,6 +75,8 @@ jobs:
           path: |
             Scout-linux-x86_64.tar.gz
             Scout-linux-x86_64.tar.gz.sha256
+            Scout-linux-x86_64-installer.run
+            Scout-linux-x86_64-installer.run.sha256
             latest.json
 
       - name: Publish GitHub release
@@ -78,4 +86,6 @@ jobs:
           files: |
             Scout-linux-x86_64.tar.gz
             Scout-linux-x86_64.tar.gz.sha256
+            Scout-linux-x86_64-installer.run
+            Scout-linux-x86_64-installer.run.sha256
             latest.json

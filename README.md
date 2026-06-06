@@ -57,6 +57,18 @@ git push origin v0.1.0
 ```
 
 The GitHub Actions workflow builds a Linux archive suitable for attaching to a release.
+It also creates a user installer:
+
+```text
+Scout-linux-x86_64-installer.run
+```
+
+Users can install with:
+
+```bash
+chmod +x Scout-linux-x86_64-installer.run
+./Scout-linux-x86_64-installer.run
+```
 
 ## In-App Updates
 
