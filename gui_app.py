@@ -3,9 +3,11 @@ from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import QThread
 from gui.agent_worker import AgentWorker
 from gui.main_windows import MainWindow
+from gui.updater import UpdateManager
 
 app = QApplication(sys.argv)
 main_window = MainWindow()
+update_manager = UpdateManager()
 
 agent_thread = QThread()
 agent_worker = AgentWorker(None)
@@ -22,10 +24,21 @@ agent_worker.stopped.connect(main_window.show_stopped)
 agent_worker.command_confirmation_requested.connect(main_window.show_command_confirmation)
 main_window.command_confirmation_resolved.connect(agent_worker.resolve_command_confirmation)
 
+main_window.update_check_requested.connect(update_manager.check_now)
+main_window.update_download_requested.connect(update_manager.download_update)
+main_window.update_apply_requested.connect(update_manager.apply_update)
+update_manager.status.connect(main_window.show_update_status)
+update_manager.no_update.connect(main_window.show_no_update)
+update_manager.error.connect(main_window.show_update_error)
+update_manager.update_available.connect(main_window.show_update_available)
+update_manager.downloaded.connect(main_window.show_update_downloaded)
+update_manager.restart_requested.connect(app.quit)
+
 app.aboutToQuit.connect(agent_thread.quit)
 app.aboutToQuit.connect(agent_thread.wait)
 
 agent_thread.start()
+update_manager.start_listener()
 
 main_window.show()
 sys.exit(app.exec())

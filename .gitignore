@@ -12,6 +12,12 @@ env/
 .env
 .env.*
 !.env.example
+*.pem
+*.key
+id_*
+*.pub
+second
+third
 
 # Logs and local conversation data
 log.json

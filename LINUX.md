@@ -87,6 +87,29 @@ sha256sum Scout-linux-x86_64.tar.gz
 
 The included GitHub Actions workflow can build this archive automatically from a version tag.
 
+## In-App Updates
+
+Scout checks for updates only when this environment variable is set:
+
+```bash
+export SCOUT_UPDATE_MANIFEST_URL=https://github.com/OWNER/REPO/releases/latest/download/latest.json
+```
+
+The manifest should look like:
+
+```json
+{
+  "name": "Scout",
+  "version": "0.1.0",
+  "platform": "linux-x86_64",
+  "release_url": "https://github.com/OWNER/REPO/releases/tag/v0.1.0",
+  "download_url": "https://github.com/OWNER/REPO/releases/download/v0.1.0/Scout-linux-x86_64.tar.gz",
+  "sha256": "release-archive-sha256"
+}
+```
+
+The settings icon in Scout manually checks for updates. Automatic checks run every six hours by default.
+
 Python installer:
 
 ```bash

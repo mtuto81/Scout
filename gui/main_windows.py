@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QListWidget,
     QMainWindow,
+    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QSizePolicy,
@@ -68,6 +69,9 @@ class MainWindow(QMainWindow):
     prompt_submitted = Signal(str)
     stop_requested = Signal()
     command_confirmation_resolved = Signal(bool)
+    update_check_requested = Signal()
+    update_download_requested = Signal(dict)
+    update_apply_requested = Signal(dict)
 
     def __init__(self):
         super().__init__()
@@ -130,8 +134,8 @@ class MainWindow(QMainWindow):
 
         self.settings_button = QPushButton()
         self.settings_button.setObjectName("secondaryButton")
-        self.settings_button.setToolTip("Settings")
-        self.settings_button.setAccessibleName("Settings")
+        self.settings_button.setToolTip("Check for updates")
+        self.settings_button.setAccessibleName("Check for updates")
         self.settings_button.setFixedHeight(42)
 
         layout.addWidget(heading)
@@ -207,6 +211,7 @@ class MainWindow(QMainWindow):
         self.prompt_edit.submit_requested.connect(self._submit_prompt)
         self.new_chat_button.clicked.connect(self._new_conversation)
         self.menu_button.clicked.connect(self._toggle_left_panel)
+        self.settings_button.clicked.connect(self.update_check_requested.emit)
 
     def _submit_prompt(self) -> None:
         if self._busy:
@@ -260,6 +265,48 @@ class MainWindow(QMainWindow):
 
     def append_flow_event(self, content: str) -> None:
         self.append_system_note(content)
+
+    def show_update_status(self, message: str) -> None:
+        self.append_system_note(f"Update: {message}")
+
+    def show_no_update(self, message: str) -> None:
+        self.append_system_note(message)
+
+    def show_update_error(self, message: str) -> None:
+        self.append_system_note(f"Update error: {message}")
+
+    def show_update_available(self, manifest: dict) -> None:
+        latest = manifest.get("version", "unknown")
+        current = manifest.get("current_version", "unknown")
+        release_url = manifest.get("release_url", "")
+        message = f"Scout {latest} is available. Current version: {current}."
+        if release_url:
+            message += f"\n\nRelease: {release_url}"
+
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Scout update available")
+        dialog.setText(message)
+        dialog.setInformativeText("Download and stage this update now?")
+        dialog.setIcon(QMessageBox.Information)
+        download_button = dialog.addButton("Download", QMessageBox.AcceptRole)
+        dialog.addButton("Later", QMessageBox.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() == download_button:
+            self.update_download_requested.emit(manifest)
+
+    def show_update_downloaded(self, download_info: dict) -> None:
+        version = download_info.get("version", "unknown")
+
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Scout update ready")
+        dialog.setText(f"Scout {version} has been downloaded and verified.")
+        dialog.setInformativeText("Restart Scout now and apply the update?")
+        dialog.setIcon(QMessageBox.Information)
+        apply_button = dialog.addButton("Restart and apply", QMessageBox.AcceptRole)
+        dialog.addButton("Later", QMessageBox.RejectRole)
+        dialog.exec()
+        if dialog.clickedButton() == apply_button:
+            self.update_apply_requested.emit(download_info)
 
     def show_command_confirmation(self, command: str) -> None:
         dialog = CommandConfirmDialog(command, self)

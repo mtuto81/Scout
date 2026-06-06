@@ -57,3 +57,19 @@ git push origin v0.1.0
 ```
 
 The GitHub Actions workflow builds a Linux archive suitable for attaching to a release.
+
+## In-App Updates
+
+Scout can check a GitHub-hosted update manifest:
+
+```bash
+export SCOUT_UPDATE_MANIFEST_URL=https://github.com/OWNER/REPO/releases/latest/download/latest.json
+```
+
+The manifest format is shown in:
+
+```text
+packaging/linux/latest.example.json
+```
+
+The app periodically checks this URL, downloads newer Linux builds, verifies SHA-256 when provided, and stages the update before asking to restart and apply.
