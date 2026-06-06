@@ -4,3 +4,4 @@ psutil
 requests
 markdown
 pypdf
+certifi

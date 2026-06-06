@@ -17,7 +17,10 @@ OLLAMA_API_KEY = os.environ.get("OLLAMA_API_KEY", "ollama")
 # Backward-compatible model override.
 MODEL = os.environ.get("AI_MODEL") or (OLLAMA_MODEL if SCOUT_BACKEND == "ollama" else OPENROUTER_MODEL)
 
-SCOUT_UPDATE_MANIFEST_URL = "https://github.com/mtuto81/Scout/releases/"
+SCOUT_UPDATE_MANIFEST_URL = os.environ.get(
+    "SCOUT_UPDATE_MANIFEST_URL",
+    "https://github.com/mtuto81/Scout/releases/latest/download/latest.json",
+).strip()
 SCOUT_UPDATE_CHECK_INTERVAL_SECONDS = int(os.environ.get("SCOUT_UPDATE_CHECK_INTERVAL_SECONDS", "21600"))
 
 

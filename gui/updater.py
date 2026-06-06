@@ -2,6 +2,7 @@ import hashlib
 import json
 import os
 import shutil
+import ssl
 import subprocess
 import sys
 import tarfile
@@ -15,6 +16,11 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 
 from app_metadata import APP_NAME, get_version
 from config import SCOUT_UPDATE_CHECK_INTERVAL_SECONDS, SCOUT_UPDATE_MANIFEST_URL
+
+try:
+    import certifi
+except Exception:
+    certifi = None
 
 
 class UpdateManager(QObject):
@@ -141,8 +147,16 @@ class UpdateManager(QObject):
             self.manifest_url,
             headers={"User-Agent": f"{APP_NAME}/{self.current_version}"},
         )
-        with urllib.request.urlopen(request, timeout=15) as response:
-            return json.loads(response.read().decode("utf-8"))
+        with _urlopen(request, timeout=15) as response:
+            body = response.read().decode("utf-8")
+            try:
+                return json.loads(body)
+            except json.JSONDecodeError as exc:
+                preview = " ".join(body[:160].split())
+                raise ValueError(
+                    f"Update manifest is not valid JSON at {self.manifest_url}. "
+                    f"Response preview: {preview}"
+                ) from exc
 
     def _create_apply_script(self, download_info: Dict[str, Any]) -> Path:
         target_dir = _current_app_dir()
@@ -209,9 +223,16 @@ def _is_packaged_app(app_dir: Path) -> bool:
 
 def _download_file(url: str, destination: Path) -> None:
     request = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{get_version()}"})
-    with urllib.request.urlopen(request, timeout=60) as response:
+    with _urlopen(request, timeout=60) as response:
         with destination.open("wb") as handle:
             shutil.copyfileobj(response, handle)
+
+
+def _urlopen(request: urllib.request.Request, timeout: int):
+    if certifi:
+        context = ssl.create_default_context(cafile=certifi.where())
+        return urllib.request.urlopen(request, timeout=timeout, context=context)
+    return urllib.request.urlopen(request, timeout=timeout)
 
 
 def _sha256_file(path: Path) -> str:

@@ -12,6 +12,7 @@ hiddenimports += collect_submodules("tools")
 hiddenimports += collect_submodules("gui")
 hiddenimports += [
     "gui.updater",
+    "certifi",
     "markdown",
     "psutil",
     "requests",
