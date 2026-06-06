@@ -86,6 +86,21 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
+          body: |
+            ## Scout Linux Installer
+
+            Download this file:
+
+            `Scout-linux-x86_64-installer.run`
+
+            Then run:
+
+            ```bash
+            chmod +x Scout-linux-x86_64-installer.run
+            ./Scout-linux-x86_64-installer.run
+            ```
+
+            The `.tar.gz` file is for portable/manual installs and in-app updates.
           files: |
             Scout-linux-x86_64.tar.gz
             Scout-linux-x86_64.tar.gz.sha256
