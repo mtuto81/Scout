@@ -23,6 +23,8 @@ agent_worker.busy_state_changed.connect(main_window.set_busy)
 agent_worker.stopped.connect(main_window.show_stopped)
 agent_worker.command_confirmation_requested.connect(main_window.show_command_confirmation)
 main_window.command_confirmation_resolved.connect(agent_worker.resolve_command_confirmation)
+main_window.settings_saved.connect(agent_worker.reload_agent)
+main_window.tool_approval_mode_changed.connect(agent_worker.set_tool_approval_mode)
 
 main_window.update_check_requested.connect(update_manager.check_now)
 main_window.update_download_requested.connect(update_manager.download_update)

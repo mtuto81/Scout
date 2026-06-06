@@ -1,3 +1,4 @@
+import os
 import re
 from html import escape
 
@@ -5,9 +6,11 @@ from PySide6.QtCore import QObject, QTimer, QSize, Qt, Signal, Slot
 from PySide6.QtGui import QFont, QKeyEvent
 from PySide6.QtWidgets import (
     QDialog,
+    QComboBox,
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QMainWindow,
     QMessageBox,
@@ -20,7 +23,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config import MODEL, SCOUT_BACKEND
+from config import MODEL, SCOUT_BACKEND, get_settings_path, get_runtime_settings, load_user_settings, save_user_settings
+
+try:
+    import qtawesome as qta
+except Exception:
+    qta = None
 
 try:
     import markdown
@@ -72,6 +80,8 @@ class MainWindow(QMainWindow):
     update_check_requested = Signal()
     update_download_requested = Signal(dict)
     update_apply_requested = Signal(dict)
+    settings_saved = Signal()
+    tool_approval_mode_changed = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -134,8 +144,8 @@ class MainWindow(QMainWindow):
 
         self.settings_button = QPushButton()
         self.settings_button.setObjectName("secondaryButton")
-        self.settings_button.setToolTip("Check for updates")
-        self.settings_button.setAccessibleName("Check for updates")
+        self.settings_button.setToolTip("Settings")
+        self.settings_button.setAccessibleName("Settings")
         self.settings_button.setFixedHeight(42)
 
         layout.addWidget(heading)
@@ -186,11 +196,26 @@ class MainWindow(QMainWindow):
         self.input_model_label = QLabel(f"{SCOUT_BACKEND}: {MODEL}")
         self.input_model_label.setObjectName("inputModelLabel")
 
+        self.tool_approval_combo = QComboBox()
+        self.tool_approval_combo.setObjectName("toolApprovalCombo")
+        self.tool_approval_combo.setToolTip("Tool execution approval")
+        self.tool_approval_combo.setAccessibleName("Tool execution approval")
+        self.tool_approval_combo.addItem("Ask approval", "ask")
+        self.tool_approval_combo.addItem("Approve all", "approve_all")
+        self.tool_approval_combo.setFixedHeight(28)
+
+        input_meta_layout = QHBoxLayout()
+        input_meta_layout.setContentsMargins(0, 0, 0, 0)
+        input_meta_layout.setSpacing(8)
+        input_meta_layout.addWidget(self.input_model_label)
+        input_meta_layout.addStretch(1)
+        input_meta_layout.addWidget(self.tool_approval_combo)
+
         input_text_layout = QVBoxLayout()
         input_text_layout.setContentsMargins(0, 0, 0, 0)
         input_text_layout.setSpacing(6)
         input_text_layout.addWidget(self.prompt_edit)
-        input_text_layout.addWidget(self.input_model_label)
+        input_text_layout.addLayout(input_meta_layout)
 
         self.send_button = QPushButton()
         self.send_button.setObjectName("primaryButton")
@@ -211,7 +236,8 @@ class MainWindow(QMainWindow):
         self.prompt_edit.submit_requested.connect(self._submit_prompt)
         self.new_chat_button.clicked.connect(self._new_conversation)
         self.menu_button.clicked.connect(self._toggle_left_panel)
-        self.settings_button.clicked.connect(self.update_check_requested.emit)
+        self.settings_button.clicked.connect(self._open_settings_dialog)
+        self.tool_approval_combo.currentIndexChanged.connect(self._emit_tool_approval_mode)
 
     def _submit_prompt(self) -> None:
         if self._busy:
@@ -228,6 +254,13 @@ class MainWindow(QMainWindow):
         self.append_message("user", prompt)
         self.set_busy(True)
         self.prompt_submitted.emit(prompt)
+
+    def _emit_tool_approval_mode(self) -> None:
+        self.tool_approval_mode_changed.emit(self.tool_approval_combo.currentData())
+        if self.tool_approval_combo.currentData() == "approve_all":
+            self.append_system_note("Tool execution approval: approve all.")
+        else:
+            self.append_system_note("Tool execution approval: ask approval.")
 
     def _new_conversation(self) -> None:
         self._conversation_count += 1
@@ -265,6 +298,15 @@ class MainWindow(QMainWindow):
 
     def append_flow_event(self, content: str) -> None:
         self.append_system_note(content)
+
+    def _open_settings_dialog(self) -> None:
+        dialog = SettingsDialog(self)
+        dialog.update_check_requested.connect(self.update_check_requested.emit)
+        if dialog.exec() == QDialog.Accepted:
+            runtime = get_runtime_settings()
+            self.input_model_label.setText(f"{runtime['backend']}: {runtime['model']}")
+            self.settings_saved.emit()
+            self.append_system_note("Settings saved.")
 
     def show_update_status(self, message: str) -> None:
         self.append_system_note(f"Update: {message}")
@@ -337,7 +379,13 @@ class MainWindow(QMainWindow):
         self.send_button.setObjectName("stopButton" if busy else "primaryButton")
         self.send_button.setToolTip("Stop" if busy else "Send")
         self.send_button.setAccessibleName("Stop" if busy else "Send")
-        self.send_button.setIcon(self._standard_icon(QStyle.StandardPixmap.SP_BrowserStop if busy else QStyle.StandardPixmap.SP_ArrowForward))
+        self.send_button.setIcon(
+            self._icon(
+                "fa5s.stop" if busy else "fa5s.paper-plane",
+                QStyle.StandardPixmap.SP_BrowserStop if busy else QStyle.StandardPixmap.SP_ArrowForward,
+                "#FFFFFF",
+            )
+        )
         self.send_button.style().unpolish(self.send_button)
         self.send_button.style().polish(self.send_button)
         self.set_status("Thinking..." if busy else "")
@@ -347,13 +395,21 @@ class MainWindow(QMainWindow):
         self.status_label.setVisible(bool(text))
 
     def _apply_button_icons(self) -> None:
-        self.menu_button.setIcon(self._standard_icon(QStyle.StandardPixmap.SP_TitleBarMenuButton))
-        self.new_chat_button.setIcon(self._standard_icon(QStyle.StandardPixmap.SP_FileIcon))
-        self.settings_button.setIcon(self._standard_icon(QStyle.StandardPixmap.SP_FileDialogDetailedView))
-        self.send_button.setIcon(self._standard_icon(QStyle.StandardPixmap.SP_ArrowForward))
+        self.menu_button.setIcon(self._icon("fa5s.bars", QStyle.StandardPixmap.SP_TitleBarMenuButton))
+        self.new_chat_button.setIcon(self._icon("fa5s.plus", QStyle.StandardPixmap.SP_FileIcon, "#FFFFFF"))
+        self.settings_button.setIcon(self._icon("fa5s.cog", QStyle.StandardPixmap.SP_FileDialogDetailedView))
+        self.send_button.setIcon(self._icon("fa5s.paper-plane", QStyle.StandardPixmap.SP_ArrowForward, "#FFFFFF"))
         icon_size = QSize(18, 18)
         for button in (self.menu_button, self.new_chat_button, self.settings_button, self.send_button):
             button.setIconSize(icon_size)
+
+    def _icon(self, icon_name: str, fallback: QStyle.StandardPixmap, color: str = "#F4F4F5"):
+        if qta:
+            try:
+                return qta.icon(icon_name, color=color)
+            except Exception:
+                pass
+        return self._standard_icon(fallback)
 
     def _standard_icon(self, icon: QStyle.StandardPixmap):
         return self.style().standardIcon(icon)
@@ -544,7 +600,8 @@ class MainWindow(QMainWindow):
             }
             QListWidget,
             QTextBrowser,
-            QPlainTextEdit {
+            QPlainTextEdit,
+            QComboBox {
                 background: #1E242A;
                 color: #F4F4F5;
                 border: 1px solid #56616D;
@@ -554,6 +611,27 @@ class MainWindow(QMainWindow):
             }
             QPlainTextEdit#promptEdit {
                 padding: 9px 10px;
+            }
+            QComboBox#toolApprovalCombo {
+                color: #F4F4F5;
+                background: #252C33;
+                border: 1px solid #56616D;
+                border-radius: 6px;
+                padding: 4px 8px;
+                min-width: 132px;
+            }
+            QComboBox#toolApprovalCombo:hover {
+                background: #333C46;
+            }
+            QComboBox#toolApprovalCombo::drop-down {
+                border: 0;
+                width: 20px;
+            }
+            QComboBox QAbstractItemView {
+                background: #252C33;
+                color: #F4F4F5;
+                border: 1px solid #56616D;
+                selection-background-color: #FF4D00;
             }
             QListWidget::item {
                 padding: 8px;
@@ -648,6 +726,138 @@ class MainWindow(QMainWindow):
 
 
 exports = MainWindow
+
+
+class SettingsDialog(QDialog):
+    update_check_requested = Signal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setModal(True)
+        self.resize(560, 280)
+
+        runtime = get_runtime_settings()
+        user_settings = load_user_settings()
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(18, 18, 18, 18)
+        layout.setSpacing(12)
+
+        title = QLabel("OpenRouter")
+        title.setObjectName("panelHeading")
+
+        self.api_key_input = QLineEdit()
+        self.api_key_input.setObjectName("settingsInput")
+        self.api_key_input.setEchoMode(QLineEdit.Password)
+        self.api_key_input.setPlaceholderText("OpenRouter API key")
+        self.api_key_input.setText(user_settings.get("openrouter_api_key", ""))
+
+        active_key_label = QLabel("Configured" if runtime.get("openrouter_api_key") else "Not configured")
+        active_key_label.setObjectName("settingsHint")
+
+        path_label = QLabel(f"Saved locally: {get_settings_path()}")
+        path_label.setObjectName("settingsHint")
+        path_label.setWordWrap(True)
+
+        if "OPENROUTER_API_KEY" in os.environ:
+            env_label = QLabel("OPENROUTER_API_KEY is set in the environment and overrides the saved key.")
+            env_label.setObjectName("settingsHint")
+            env_label.setWordWrap(True)
+        else:
+            env_label = None
+
+        action_row = QHBoxLayout()
+        action_row.setContentsMargins(0, 0, 0, 0)
+        action_row.setSpacing(8)
+
+        check_updates_button = QPushButton("Check updates")
+        check_updates_button.setObjectName("secondaryButton")
+        check_updates_button.clicked.connect(self.update_check_requested.emit)
+
+        clear_button = QPushButton("Clear key")
+        clear_button.setObjectName("secondaryButton")
+        clear_button.clicked.connect(self._clear_key)
+
+        action_row.addWidget(check_updates_button)
+        action_row.addStretch(1)
+        action_row.addWidget(clear_button)
+
+        button_row = QHBoxLayout()
+        button_row.setContentsMargins(0, 0, 0, 0)
+        button_row.addStretch(1)
+
+        cancel_button = QPushButton("Cancel")
+        cancel_button.setObjectName("secondaryButton")
+        cancel_button.clicked.connect(self.reject)
+
+        save_button = QPushButton("Save")
+        save_button.setObjectName("primaryButton")
+        save_button.clicked.connect(self._save)
+
+        button_row.addWidget(cancel_button)
+        button_row.addWidget(save_button)
+
+        layout.addWidget(title)
+        layout.addWidget(active_key_label)
+        layout.addWidget(self.api_key_input)
+        layout.addWidget(path_label)
+        if env_label:
+            layout.addWidget(env_label)
+        layout.addLayout(action_row)
+        layout.addStretch(1)
+        layout.addLayout(button_row)
+
+        self.setStyleSheet(
+            """
+            QDialog {
+                background: #252C33;
+                color: #F4F4F5;
+            }
+            QLabel#panelHeading {
+                font-size: 15px;
+                font-weight: 700;
+                color: #FFFFFF;
+            }
+            QLabel#settingsHint {
+                color: #B8C0C8;
+                font-size: 12px;
+            }
+            QLineEdit#settingsInput {
+                background: #1E242A;
+                color: #F4F4F5;
+                border: 1px solid #56616D;
+                border-radius: 6px;
+                padding: 10px;
+                selection-background-color: #FF4D00;
+            }
+            QPushButton {
+                color: #F4F4F5;
+                background: #333C46;
+                border: 1px solid #56616D;
+                border-radius: 6px;
+                padding: 8px 14px;
+                font-weight: 600;
+            }
+            QPushButton#primaryButton {
+                color: #FFFFFF;
+                background: #FF4D00;
+                border-color: #FF4D00;
+            }
+            QPushButton#secondaryButton {
+                color: #F4F4F5;
+                background: #252C33;
+                border-color: #56616D;
+            }
+            """
+        )
+
+    def _clear_key(self) -> None:
+        self.api_key_input.clear()
+
+    def _save(self) -> None:
+        save_user_settings({"openrouter_api_key": self.api_key_input.text().strip()})
+        self.accept()
 
 
 class CommandConfirmDialog(QDialog):

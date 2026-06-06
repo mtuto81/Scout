@@ -15,6 +15,8 @@ hiddenimports += [
     "certifi",
     "markdown",
     "psutil",
+    "qtawesome",
+    "qtpy",
     "requests",
     "PySide6.QtCore",
     "PySide6.QtGui",

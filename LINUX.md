@@ -18,6 +18,12 @@ For the online backend, set your API key outside git:
 export OPENROUTER_API_KEY=your_key_here
 ```
 
+Or open Scout Settings and save the OpenRouter API key in the app. It is stored locally in:
+
+```text
+~/.config/scout/settings.json
+```
+
 For local Ollama:
 
 ```bash

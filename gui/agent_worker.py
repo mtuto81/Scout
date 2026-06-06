@@ -25,12 +25,27 @@ class AgentWorker(QObject):
         self._task = None
         self._confirm_event = threading.Event()
         self._confirm_result = False
+        self._tool_approval_mode = "ask"
 
     @Slot()
     def init(self):
         try:
             self._install_command_confirm_callback()
             self.agent = AsyncAIAgent(event_callback=self._emit_flow_event)
+        except Exception as exc:
+            self.error.emit(str(exc))
+
+    @Slot()
+    def reload_agent(self):
+        with self._lock:
+            if self._busy:
+                self.error.emit("Settings saved, but the agent is busy. Restart Scout or wait before testing the new key.")
+                return
+
+        try:
+            self._install_command_confirm_callback()
+            self.agent = AsyncAIAgent(event_callback=self._emit_flow_event)
+            self.flow_event.emit("Agent settings reloaded.")
         except Exception as exc:
             self.error.emit(str(exc))
 
@@ -54,6 +69,17 @@ class AgentWorker(QObject):
                 daemon=True,
             )
             self._job_thread.start()
+
+    @Slot(str)
+    def set_tool_approval_mode(self, mode: str):
+        normalized = mode if mode in ("ask", "approve_all") else "ask"
+        with self._lock:
+            self._tool_approval_mode = normalized
+        self.flow_event.emit(
+            "Tool execution approval set to approve all."
+            if normalized == "approve_all"
+            else "Tool execution approval set to ask approval."
+        )
 
     def _run_query_job(self, query: str):
         loop = asyncio.new_event_loop()
@@ -122,6 +148,13 @@ class AgentWorker(QObject):
         set_confirm_callback(self._confirm_command)
 
     def _confirm_command(self, command: str) -> bool:
+        with self._lock:
+            approval_mode = self._tool_approval_mode
+
+        if approval_mode == "approve_all":
+            self.flow_event.emit(f"Auto-approved command: {command}")
+            return True
+
         self._confirm_result = False
         self._confirm_event.clear()
         self.command_confirmation_requested.emit(command)

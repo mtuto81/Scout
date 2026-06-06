@@ -1,11 +1,11 @@
 {
   "name": "Scout",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "platform": "linux-x86_64",
-  "release_url": "https://github.com/mtuto81/Scout/releases/tag/v0.0.4",
-  "download_url": "https://github.com/mtuto81/Scout/releases/download/v0.0.4/Scout-linux-x86_64.tar.gz",
+  "release_url": "https://github.com/mtuto81/Scout/releases/tag/v0.0.5",
+  "download_url": "https://github.com/mtuto81/Scout/releases/download/v0.0.5/Scout-linux-x86_64.tar.gz",
   "sha256": "replace-with-release-archive-sha256",
-  "installer_url": "https://github.com/mtuto81/Scout/releases/download/v0.0.4/Scout-linux-x86_64-installer.run",
+  "installer_url": "https://github.com/mtuto81/Scout/releases/download/v0.0.5/Scout-linux-x86_64-installer.run",
   "installer_sha256": "replace-with-installer-sha256",
   "notes": "Optional release notes shown by your release page."
 }

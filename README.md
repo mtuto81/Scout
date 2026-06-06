@@ -30,8 +30,13 @@ python install_linux_desktop.py
 ```
 
 ## Configuration
+In the desktop app, open Settings and save your OpenRouter API key there. Scout stores it locally in:
 
-Do not commit real API keys. Use environment variables or a local `.env` file copied from `.env.example`.
+```text
+~/.config/scout/settings.json
+```
+
+Environment variables still override saved settings.
 
 For OpenRouter:
 
@@ -47,41 +52,6 @@ export SCOUT_BACKEND=ollama
 export OLLAMA_MODEL=gemma4:latest
 ```
 
-## GitHub Releases
 
-Use git tags for app updates:
-
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-```
-
-The GitHub Actions workflow builds a Linux archive suitable for attaching to a release.
-It also creates a user installer:
-
-```text
-Scout-linux-x86_64-installer.run
-```
-
-Users can install with:
-
-```bash
-chmod +x Scout-linux-x86_64-installer.run
-./Scout-linux-x86_64-installer.run
-```
 
 ## In-App Updates
-
-Scout can check a GitHub-hosted update manifest:
-
-```bash
-export SCOUT_UPDATE_MANIFEST_URL=https://github.com/OWNER/REPO/releases/latest/download/latest.json
-```
-
-The manifest format is shown in:
-
-```text
-packaging/linux/latest.example.json
-```
-
-The app periodically checks this URL, downloads newer Linux builds, verifies SHA-256 when provided, and stages the update before asking to restart and apply.
