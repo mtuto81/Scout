@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
 )
 
 from config import MODEL, SCOUT_BACKEND, get_settings_path, get_runtime_settings, load_user_settings, save_user_settings
+from gui.conversation_store import ConversationStore
 
 try:
     import qtawesome as qta
@@ -37,6 +38,9 @@ except Exception:
 
 
 def _load_webengine_dialog_classes():
+    if os.environ.get("SCOUT_ENABLE_WEBENGINE_DIALOG") != "1":
+        return None, None
+
     try:
         from PySide6.QtWebChannel import QWebChannel
         from PySide6.QtWebEngineWidgets import QWebEngineView
@@ -74,7 +78,7 @@ class PromptEdit(QPlainTextEdit):
 
 
 class MainWindow(QMainWindow):
-    prompt_submitted = Signal(str)
+    prompt_submitted = Signal(str, int)
     stop_requested = Signal()
     command_confirmation_resolved = Signal(bool)
     update_check_requested = Signal()
@@ -82,6 +86,7 @@ class MainWindow(QMainWindow):
     update_apply_requested = Signal(dict)
     settings_saved = Signal()
     tool_approval_mode_changed = Signal(str)
+    conversation_context_changed = Signal(list)
 
     def __init__(self):
         super().__init__()
@@ -92,16 +97,21 @@ class MainWindow(QMainWindow):
 
         self._chat_items = []
         self._left_panel_visible = True
+        self._sidebar_expanded_width = 260
+        self._sidebar_collapsed_width = 54
+        self._store = ConversationStore()
+        self._current_conversation_id = None
+        self._loading_conversation = False
+        self._active_request_conversation_id = None
 
         self._build_ui()
         self._apply_button_icons()
         self._connect_signals()
         self._apply_styles()
 
-        self._conversation_count = 0
         self._busy = False
         self._stop_message_shown = False
-        self._new_conversation()
+        self._load_conversations()
         self.set_status("")
 
     def _build_ui(self) -> None:
@@ -115,7 +125,7 @@ class MainWindow(QMainWindow):
         content_layout.setSpacing(10)
 
         self.sidebar_panel = self._build_sidebar()
-        self.sidebar_panel.setFixedWidth(260)
+        self.sidebar_panel.setFixedWidth(self._sidebar_expanded_width)
 
         content_layout.addWidget(self.sidebar_panel)
         content_layout.addWidget(self._build_chat_panel(), 1)
@@ -133,10 +143,22 @@ class MainWindow(QMainWindow):
         heading = QLabel("Conversations")
         heading.setObjectName("panelHeading")
 
+        self.menu_button = QPushButton()
+        self.menu_button.setObjectName("secondaryButton")
+        self.menu_button.setToolTip("Show or hide conversations")
+        self.menu_button.setAccessibleName("Show or hide conversations")
+        self.menu_button.setFixedSize(34, 34)
+
+        heading_layout = QHBoxLayout()
+        heading_layout.setContentsMargins(0, 0, 0, 0)
+        heading_layout.setSpacing(8)
+        heading_layout.addWidget(self.menu_button)
+        heading_layout.addWidget(heading, 1)
+
         self.conversation_list = QListWidget()
         self.conversation_list.setObjectName("conversationList")
 
-        self.new_chat_button = QPushButton()
+        self.new_chat_button = QPushButton("New conversation")
         self.new_chat_button.setObjectName("primaryButton")
         self.new_chat_button.setToolTip("New conversation")
         self.new_chat_button.setAccessibleName("New conversation")
@@ -148,7 +170,14 @@ class MainWindow(QMainWindow):
         self.settings_button.setAccessibleName("Settings")
         self.settings_button.setFixedHeight(42)
 
-        layout.addWidget(heading)
+        self._sidebar_expanded_widgets = (
+            heading,
+            self.conversation_list,
+            self.new_chat_button,
+            self.settings_button,
+        )
+
+        layout.addLayout(heading_layout)
         layout.addWidget(self.conversation_list, 1)
         layout.addWidget(self.new_chat_button)
         layout.addWidget(self.settings_button)
@@ -165,16 +194,9 @@ class MainWindow(QMainWindow):
         header_layout.setContentsMargins(0, 0, 0, 0)
         header_layout.setSpacing(8)
 
-        self.menu_button = QPushButton()
-        self.menu_button.setObjectName("secondaryButton")
-        self.menu_button.setToolTip("Show or hide conversations")
-        self.menu_button.setAccessibleName("Show or hide conversations")
-        self.menu_button.setFixedSize(42, 38)
-
         self.status_label = QLabel()
         self.status_label.setObjectName("statusPill")
 
-        header_layout.addWidget(self.menu_button)
         header_layout.addStretch(1)
         header_layout.addWidget(self.status_label)
 
@@ -238,22 +260,36 @@ class MainWindow(QMainWindow):
         self.menu_button.clicked.connect(self._toggle_left_panel)
         self.settings_button.clicked.connect(self._open_settings_dialog)
         self.tool_approval_combo.currentIndexChanged.connect(self._emit_tool_approval_mode)
+        self.conversation_list.currentItemChanged.connect(self._conversation_selected)
 
     def _submit_prompt(self) -> None:
         if self._busy:
+            conversation_id = self._active_request_conversation_id
             self.stop_requested.emit()
-            self.append_system_note("Stop requested.")
-            self.show_stopped()
+            self.append_flow_event("Stop requested.", conversation_id or -1)
+            self.show_stopped(conversation_id)
             return
 
         prompt = self.prompt_edit.toPlainText().strip()
         if not prompt:
             return
 
+        if self._current_conversation_id is None:
+            self._create_conversation(select=True)
+
+        conversation_id = self._current_conversation_id
+        self._emit_conversation_context(conversation_id)
+        self._active_request_conversation_id = conversation_id
         self.prompt_edit.clear()
         self.append_message("user", prompt)
+        self._store.add_message(conversation_id, "user", prompt)
+        title = self._store.maybe_title_from_first_user_message(conversation_id, prompt)
+        if title:
+            current_item = self.conversation_list.currentItem()
+            if current_item and current_item.data(Qt.UserRole) == conversation_id:
+                current_item.setText(title)
         self.set_busy(True)
-        self.prompt_submitted.emit(prompt)
+        self.prompt_submitted.emit(prompt, conversation_id)
 
     def _emit_tool_approval_mode(self) -> None:
         self.tool_approval_mode_changed.emit(self.tool_approval_combo.currentData())
@@ -263,15 +299,66 @@ class MainWindow(QMainWindow):
             self.append_system_note("Tool execution approval: ask approval.")
 
     def _new_conversation(self) -> None:
-        self._conversation_count += 1
-        title = f"New chat {self._conversation_count}"
-        self.conversation_list.addItem(title)
-        self.conversation_list.setCurrentRow(self.conversation_list.count() - 1)
+        self._create_conversation(select=True)
+
+    def _create_conversation(self, select: bool) -> int:
+        conversation_id = self._store.create_conversation()
+        self._load_conversations(select_conversation_id=conversation_id)
+        if select:
+            self._chat_items = []
+            self._render_chat_html()
+            self.append_system_note("New conversation started.")
+        return conversation_id
+
+    def _load_conversations(self, select_conversation_id: int | None = None) -> None:
+        self._loading_conversation = True
+        self.conversation_list.clear()
+
+        conversations = self._store.list_conversations()
+        for conversation in conversations:
+            self.conversation_list.addItem(conversation["title"])
+            item = self.conversation_list.item(self.conversation_list.count() - 1)
+            item.setData(Qt.UserRole, conversation["id"])
+
+        self._loading_conversation = False
+
+        if not conversations:
+            conversation_id = self._store.create_conversation()
+            self._load_conversations(select_conversation_id=conversation_id)
+            return
+
+        target_id = select_conversation_id or conversations[0]["id"]
+        for row in range(self.conversation_list.count()):
+            item = self.conversation_list.item(row)
+            if item.data(Qt.UserRole) == target_id:
+                self.conversation_list.setCurrentRow(row)
+                return
+
+    def _conversation_selected(self, current, previous) -> None:
+        if self._loading_conversation or current is None:
+            return
+
+        conversation_id = current.data(Qt.UserRole)
+        if conversation_id == self._current_conversation_id:
+            return
+
+        self._current_conversation_id = conversation_id
         self._chat_items = []
         self._render_chat_html()
-        self.append_system_note("New conversation started.")
+        for message in self._store.get_messages(conversation_id):
+            if message["role"] in ("user", "assistant"):
+                self.append_message(message["role"], message["content"], persist=False)
+        self._emit_conversation_context(conversation_id)
 
-    def append_message(self, role: str, content: str) -> None:
+    def _emit_conversation_context(self, conversation_id: int) -> None:
+        messages = [
+            {"role": message["role"], "content": message["content"]}
+            for message in self._store.get_messages(conversation_id)
+            if message["role"] in ("user", "assistant")
+        ]
+        self.conversation_context_changed.emit(messages)
+
+    def append_message(self, role: str, content: str, persist: bool = False) -> None:
         css_class = "userMessage" if role == "user" else "agentMessage"
         content_html = self._message_content_html(role, content)
         html = (
@@ -282,6 +369,8 @@ class MainWindow(QMainWindow):
             "</div>"
         )
         self._append_chat_html(html)
+        if persist and self._current_conversation_id is not None:
+            self._store.add_message(self._current_conversation_id, role, content)
 
     def append_system_note(self, content: str) -> None:
         html = f"<div class='systemNote'>{escape(content)}</div>"
@@ -296,7 +385,9 @@ class MainWindow(QMainWindow):
     def append_log(self, content: str) -> None:
         self.append_system_note(content)
 
-    def append_flow_event(self, content: str) -> None:
+    def append_flow_event(self, content: str, conversation_id: int = -1) -> None:
+        if conversation_id != -1 and conversation_id != self._current_conversation_id:
+            return
         self.append_system_note(content)
 
     def _open_settings_dialog(self) -> None:
@@ -354,21 +445,35 @@ class MainWindow(QMainWindow):
         dialog = CommandConfirmDialog(command, self)
         self.command_confirmation_resolved.emit(dialog.exec() == QDialog.Accepted)
 
-    def show_agent_response(self, response: str) -> None:
-        self.append_message("assistant", response)
+    def show_agent_response(self, response: str, conversation_id: int) -> None:
+        self._store.add_message(conversation_id, "assistant", response)
+        if conversation_id == self._current_conversation_id:
+            self.append_message("assistant", response)
+        else:
+            self._load_conversations(select_conversation_id=self._current_conversation_id)
         self.set_busy(False)
+        self._active_request_conversation_id = None
 
-    def show_error(self, message: str) -> None:
-        self.append_system_note(f"Error: {message}")
-        self.append_log(f"Error: {message}")
+    def show_error(self, message: str, conversation_id: int = -1) -> None:
+        if conversation_id == -1 or conversation_id == self._current_conversation_id:
+            self.append_system_note(f"Error: {message}")
         self.set_busy(False)
+        if conversation_id == self._active_request_conversation_id:
+            self._active_request_conversation_id = None
 
-    def show_stopped(self) -> None:
+    def show_stopped(self, conversation_id: int | None = None) -> None:
         if self._stop_message_shown:
+            return
+        if conversation_id is not None and conversation_id != self._current_conversation_id:
+            self.set_busy(False)
+            if conversation_id == self._active_request_conversation_id:
+                self._active_request_conversation_id = None
             return
         self._stop_message_shown = True
         self.append_system_note("Request stopped.")
         self.set_busy(False)
+        if conversation_id == self._active_request_conversation_id:
+            self._active_request_conversation_id = None
 
     def set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -555,7 +660,13 @@ class MainWindow(QMainWindow):
 
     def _toggle_left_panel(self) -> None:
         self._left_panel_visible = not self._left_panel_visible
-        self.sidebar_panel.setVisible(self._left_panel_visible)
+        self.sidebar_panel.setFixedWidth(
+            self._sidebar_expanded_width
+            if self._left_panel_visible
+            else self._sidebar_collapsed_width
+        )
+        for widget in self._sidebar_expanded_widgets:
+            widget.setVisible(self._left_panel_visible)
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(

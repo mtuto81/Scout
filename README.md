@@ -38,6 +38,12 @@ In the desktop app, open Settings and save your OpenRouter API key there. Scout 
 
 Environment variables still override saved settings.
 
+Conversations are persisted locally with SQLite:
+
+```text
+~/.local/share/scout/conversations.sqlite3
+```
+
 For OpenRouter:
 
 ```bash

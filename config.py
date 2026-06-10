@@ -4,7 +4,7 @@ from pathlib import Path
 
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_MODEL = "z-ai/glm-4.5-air:free"
+DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_OLLAMA_MODEL = "gemma4:latest"
 DEFAULT_UPDATE_MANIFEST_URL = "https://github.com/mtuto81/Scout/releases/latest/download/latest.json"

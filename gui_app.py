@@ -25,6 +25,7 @@ agent_worker.command_confirmation_requested.connect(main_window.show_command_con
 main_window.command_confirmation_resolved.connect(agent_worker.resolve_command_confirmation)
 main_window.settings_saved.connect(agent_worker.reload_agent)
 main_window.tool_approval_mode_changed.connect(agent_worker.set_tool_approval_mode)
+main_window.conversation_context_changed.connect(agent_worker.load_conversation_context)
 
 main_window.update_check_requested.connect(update_manager.check_now)
 main_window.update_download_requested.connect(update_manager.download_update)

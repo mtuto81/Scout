@@ -1,12 +1,23 @@
 import sqlite3
 from datetime import datetime
+import os
 from pathlib import Path
 from typing import Dict, List, Optional
 
 
+def default_db_path() -> Path:
+    data_home = os.environ.get("XDG_DATA_HOME")
+    if data_home:
+        base = Path(data_home)
+    else:
+        base = Path.home() / ".local" / "share"
+    return base / "scout" / "conversations.sqlite3"
+
+
 class ConversationStore:
-    def __init__(self, db_path: str = "conversations.db"):
-        self.db_path = Path(db_path)
+    def __init__(self, db_path: str | Path | None = None):
+        self.db_path = Path(db_path) if db_path else default_db_path()
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
 
     def _connect(self):
@@ -36,6 +47,7 @@ class ConversationStore:
                 )
                 """
             )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id)")
 
     def create_conversation(self, title: str = "New chat") -> int:
         now = datetime.now().isoformat(timespec="seconds")

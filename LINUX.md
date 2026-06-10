@@ -24,6 +24,12 @@ Or open Scout Settings and save the OpenRouter API key in the app. It is stored 
 ~/.config/scout/settings.json
 ```
 
+Conversations are stored locally in:
+
+```text
+~/.local/share/scout/conversations.sqlite3
+```
+
 For local Ollama:
 
 ```bash
