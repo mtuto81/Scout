@@ -25,6 +25,7 @@ log.jsonl
 *.log
 *.sqlite
 *.sqlite3
+conversations.db
 
 # PyInstaller output
 build/
@@ -44,3 +45,5 @@ agent().py
 # OS files
 .DS_Store
 Thumbs.db
+bugs.md
+

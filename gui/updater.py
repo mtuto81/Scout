@@ -114,11 +114,27 @@ class UpdateManager(QObject):
         updates_dir.mkdir(parents=True, exist_ok=True)
         archive_path = updates_dir / "Scout-linux-x86_64.tar.gz"
 
-        _download_file(download_url, archive_path)
+        download_info = _download_file(download_url, archive_path)
         actual_sha256 = _sha256_file(archive_path)
-        if expected_sha256 and expected_sha256 != "replace-with-release-archive-sha256":
+        if expected_sha256 and not _is_placeholder_sha(expected_sha256):
             if actual_sha256 != expected_sha256:
-                raise ValueError("Downloaded update failed SHA-256 verification.")
+                raise ValueError(
+                    _sha256_mismatch_message(
+                        archive_path,
+                        expected_sha256,
+                        actual_sha256,
+                        download_url,
+                        download_info,
+                    )
+                )
+
+        if not _looks_like_gzip(archive_path):
+            raise ValueError(
+                "Downloaded update is not a gzip archive. "
+                f"URL: {download_url}. "
+                f"Downloaded bytes: {archive_path.stat().st_size}. "
+                f"Preview: {_file_preview(archive_path)}"
+            )
 
         staged_root = updates_dir / "staged"
         if staged_root.exists():
@@ -221,11 +237,23 @@ def _is_packaged_app(app_dir: Path) -> bool:
     return (app_dir / APP_NAME).exists() and (app_dir / "_internal").exists()
 
 
-def _download_file(url: str, destination: Path) -> None:
+def _download_file(url: str, destination: Path) -> Dict[str, Any]:
     request = urllib.request.Request(url, headers={"User-Agent": f"{APP_NAME}/{get_version()}"})
+    temp_destination = destination.with_name(destination.name + ".part")
+    temp_destination.unlink(missing_ok=True)
+
     with _urlopen(request, timeout=60) as response:
-        with destination.open("wb") as handle:
+        with temp_destination.open("wb") as handle:
             shutil.copyfileobj(response, handle)
+        info = {
+            "final_url": response.geturl(),
+            "status": response.getcode(),
+            "content_type": response.headers.get("Content-Type", ""),
+            "content_length": response.headers.get("Content-Length", ""),
+        }
+
+    temp_destination.replace(destination)
+    return info
 
 
 def _urlopen(request: urllib.request.Request, timeout: int):
@@ -241,6 +269,50 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _is_placeholder_sha(value: str) -> bool:
+    normalized = value.strip().lower()
+    return (
+        not normalized
+        or normalized.startswith("replace-with-")
+        or normalized in {"release-archive-sha256", "installer-sha256"}
+    )
+
+
+def _looks_like_gzip(path: Path) -> bool:
+    try:
+        with path.open("rb") as handle:
+            return handle.read(2) == b"\x1f\x8b"
+    except Exception:
+        return False
+
+
+def _file_preview(path: Path, limit: int = 120) -> str:
+    try:
+        data = path.read_bytes()[:limit]
+    except Exception:
+        return "<unreadable>"
+    text = data.decode("utf-8", errors="replace")
+    return " ".join(text.split())
+
+
+def _sha256_mismatch_message(
+    archive_path: Path,
+    expected_sha256: str,
+    actual_sha256: str,
+    download_url: str,
+    download_info: Dict[str, Any],
+) -> str:
+    return (
+        "Downloaded update failed SHA-256 verification. "
+        f"Expected: {expected_sha256}. "
+        f"Actual: {actual_sha256}. "
+        f"Downloaded bytes: {archive_path.stat().st_size}. "
+        f"Content-Type: {download_info.get('content_type') or 'unknown'}. "
+        f"Final URL: {download_info.get('final_url') or download_url}. "
+        f"Preview: {_file_preview(archive_path)}"
+    )
 
 
 def _version_tuple(version: str) -> Tuple[int, ...]:
