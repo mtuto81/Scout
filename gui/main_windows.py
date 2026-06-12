@@ -23,7 +23,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from config import MODEL, SCOUT_BACKEND, get_settings_path, get_runtime_settings, load_user_settings, save_user_settings
+from app_metadata import get_version
+from config import MODEL, SCOUT_BACKEND, get_settings_path, get_runtime_settings, load_user_settings, save_user_settings, short_secret_hash
 from gui.conversation_store import ConversationStore
 
 try:
@@ -112,7 +113,6 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._stop_message_shown = False
         self._load_conversations()
-        self.set_status("")
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -132,6 +132,30 @@ class MainWindow(QMainWindow):
         root_layout.addLayout(content_layout, 1)
 
         self.setCentralWidget(root)
+        self._build_bottom_alert()
+
+    def _build_bottom_alert(self) -> None:
+        self.bottom_alert = QFrame(self.centralWidget())
+        self.bottom_alert.setObjectName("bottomAlert")
+        self.bottom_alert.setVisible(False)
+
+        alert_layout = QHBoxLayout(self.bottom_alert)
+        alert_layout.setContentsMargins(14, 10, 10, 10)
+        alert_layout.setSpacing(10)
+
+        self.bottom_alert_label = QLabel()
+        self.bottom_alert_label.setObjectName("bottomAlertLabel")
+        self.bottom_alert_label.setWordWrap(True)
+
+        self.bottom_alert_close = QPushButton("x")
+        self.bottom_alert_close.setObjectName("bottomAlertClose")
+        self.bottom_alert_close.setToolTip("Dismiss")
+        self.bottom_alert_close.setAccessibleName("Dismiss alert")
+        self.bottom_alert_close.setFixedSize(26, 26)
+        self.bottom_alert_close.clicked.connect(self.bottom_alert.hide)
+
+        alert_layout.addWidget(self.bottom_alert_label, 1)
+        alert_layout.addWidget(self.bottom_alert_close, 0, Qt.AlignTop)
 
     def _build_sidebar(self) -> QWidget:
         panel = QFrame()
@@ -164,7 +188,7 @@ class MainWindow(QMainWindow):
         self.new_chat_button.setAccessibleName("New conversation")
         self.new_chat_button.setFixedHeight(42)
 
-        self.settings_button = QPushButton()
+        self.settings_button = QPushButton("Settings")
         self.settings_button.setObjectName("secondaryButton")
         self.settings_button.setToolTip("Settings")
         self.settings_button.setAccessibleName("Settings")
@@ -173,12 +197,11 @@ class MainWindow(QMainWindow):
         self._sidebar_expanded_widgets = (
             heading,
             self.conversation_list,
-            self.new_chat_button,
-            self.settings_button,
         )
 
         layout.addLayout(heading_layout)
         layout.addWidget(self.conversation_list, 1)
+        layout.addStretch(1)
         layout.addWidget(self.new_chat_button)
         layout.addWidget(self.settings_button)
         return panel
@@ -190,20 +213,12 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(8)
-
-        self.status_label = QLabel()
-        self.status_label.setObjectName("statusPill")
-
-        header_layout.addStretch(1)
-        header_layout.addWidget(self.status_label)
-
         self.chat_browser = QTextBrowser()
         self.chat_browser.setObjectName("chatBrowser")
         self.chat_browser.setOpenExternalLinks(True)
         self.chat_browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.chat_browser.setStyleSheet("background: #414B56; border: 0;")
+        self.chat_browser.viewport().setStyleSheet("background: #414B56;")
 
         input_frame = QFrame()
         input_frame.setObjectName("inputFrame")
@@ -213,7 +228,7 @@ class MainWindow(QMainWindow):
 
         self.prompt_edit = PromptEdit()
         self.prompt_edit.setObjectName("promptEdit")
-        self.prompt_edit.setPlaceholderText("Ask the agent...")
+        self.prompt_edit.setPlaceholderText("Ask me anything.")
 
         self.input_model_label = QLabel(f"{SCOUT_BACKEND}: {MODEL}")
         self.input_model_label.setObjectName("inputModelLabel")
@@ -248,7 +263,6 @@ class MainWindow(QMainWindow):
         input_layout.addLayout(input_text_layout, 1)
         input_layout.addWidget(self.send_button, 0, Qt.AlignTop)
 
-        layout.addLayout(header_layout)
         layout.addWidget(self.chat_browser, 1)
         layout.addWidget(input_frame)
         return panel
@@ -376,15 +390,6 @@ class MainWindow(QMainWindow):
         html = f"<div class='systemNote'>{escape(content)}</div>"
         self._append_chat_html(html)
 
-    def append_tool_log(self, content: str) -> None:
-        self.append_system_note(f"Tool: {content}")
-
-    def append_pdf_note(self, content: str) -> None:
-        self.append_system_note(f"PDF: {content}")
-
-    def append_log(self, content: str) -> None:
-        self.append_system_note(content)
-
     def append_flow_event(self, content: str, conversation_id: int = -1) -> None:
         if conversation_id != -1 and conversation_id != self._current_conversation_id:
             return
@@ -400,13 +405,34 @@ class MainWindow(QMainWindow):
             self.append_system_note("Settings saved.")
 
     def show_update_status(self, message: str) -> None:
-        self.append_system_note(f"Update: {message}")
+        self.show_bottom_alert(f"Update: {message}")
 
     def show_no_update(self, message: str) -> None:
-        self.append_system_note(message)
+        self.show_bottom_alert(message)
 
     def show_update_error(self, message: str) -> None:
-        self.append_system_note(f"Update error: {message}")
+        self.show_bottom_alert(f"Update error: {message}")
+
+    def show_bottom_alert(self, message: str) -> None:
+        self.bottom_alert_label.setText(message)
+        self.bottom_alert.setVisible(True)
+        self._position_bottom_alert()
+        self.bottom_alert.raise_()
+
+    def _position_bottom_alert(self) -> None:
+        if not hasattr(self, "bottom_alert"):
+            return
+        parent = self.centralWidget()
+        if not parent:
+            return
+
+        max_width = max(280, parent.width() - 32)
+        width = min(560, max_width)
+        self.bottom_alert.setFixedWidth(width)
+        height = max(48, self.bottom_alert.sizeHint().height())
+        x = (parent.width() - width) // 2
+        y = parent.height() - height - 18
+        self.bottom_alert.setGeometry(x, y, width, height)
 
     def show_update_available(self, manifest: dict) -> None:
         latest = manifest.get("version", "unknown")
@@ -440,6 +466,10 @@ class MainWindow(QMainWindow):
         dialog.exec()
         if dialog.clickedButton() == apply_button:
             self.update_apply_requested.emit(download_info)
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._position_bottom_alert()
 
     def show_command_confirmation(self, command: str) -> None:
         dialog = CommandConfirmDialog(command, self)
@@ -493,11 +523,6 @@ class MainWindow(QMainWindow):
         )
         self.send_button.style().unpolish(self.send_button)
         self.send_button.style().polish(self.send_button)
-        self.set_status("Thinking..." if busy else "")
-
-    def set_status(self, text: str) -> None:
-        self.status_label.setText(text)
-        self.status_label.setVisible(bool(text))
 
     def _apply_button_icons(self) -> None:
         self.menu_button.setIcon(self._icon("fa5s.bars", QStyle.StandardPixmap.SP_TitleBarMenuButton))
@@ -550,6 +575,7 @@ class MainWindow(QMainWindow):
 
     def _render_chat_html(self) -> None:
         items_html = "\n".join(self._chat_items)
+        self.chat_browser.document().setDefaultStyleSheet("body { background: #414B56; }")
         self.chat_browser.setHtml(
             f"""
             <!doctype html>
@@ -558,7 +584,7 @@ class MainWindow(QMainWindow):
             <style>
                 body {{
                     margin: 0;
-                    background: #1E242A;
+                    background: #414B56;
                     color: #F4F4F5;
                     font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
                 }}
@@ -567,7 +593,8 @@ class MainWindow(QMainWindow):
                     margin-right: auto;
                 }}
                 .messageRow {{
-                    margin: 12px 0;
+                    margin: 14px 0;
+                    width: 100%;
                 }}
                 .userRow {{
                     text-align: right;
@@ -577,18 +604,22 @@ class MainWindow(QMainWindow):
                 }}
                 .message {{
                     padding: 12px;
-                    border-radius: 8px;
+                    border-radius: 14px;
                     display: inline-block;
                 }}
                 .userMessage {{
-                    background: #333C46;
-                    border: 1px solid #FF4D00;
+                    background: #272c30;
+                    border: 1px solid #687684;
+                    border-radius: 16px;
                     max-width: 62%;
-                    text-align: left;
+                    text-align: right;
                 }}
                 .agentMessage {{
                     background: transparent;
                     border: 0;
+                    display: block;
+                    margin-left: auto;
+                    margin-right: auto;
                     max-width: 78%;
                     text-align: left;
                 }}
@@ -660,6 +691,9 @@ class MainWindow(QMainWindow):
 
     def _toggle_left_panel(self) -> None:
         self._left_panel_visible = not self._left_panel_visible
+        self._sync_sidebar_state()
+
+    def _sync_sidebar_state(self) -> None:
         self.sidebar_panel.setFixedWidth(
             self._sidebar_expanded_width
             if self._left_panel_visible
@@ -667,6 +701,17 @@ class MainWindow(QMainWindow):
         )
         for widget in self._sidebar_expanded_widgets:
             widget.setVisible(self._left_panel_visible)
+        if self._left_panel_visible:
+            self.new_chat_button.setText("New conversation")
+            self.settings_button.setText("Settings")
+            for button in (self.new_chat_button, self.settings_button):
+                button.setMinimumSize(0, 42)
+                button.setMaximumSize(16777215, 42)
+        else:
+            self.new_chat_button.setText("")
+            self.settings_button.setText("")
+            for button in (self.new_chat_button, self.settings_button):
+                button.setFixedSize(34, 34)
 
     def _apply_styles(self) -> None:
         self.setStyleSheet(
@@ -680,16 +725,15 @@ class MainWindow(QMainWindow):
                 color: #F4F4F5;
                 font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
             }
-            QFrame#sidePanel,
-            QFrame#chatPanel {
+            QFrame#sidePanel {
                 background: #252C33;
                 border: 1px solid #56616D;
                 border-radius: 8px;
             }
-            QLabel#appTitle {
-                font-size: 18px;
-                font-weight: 700;
-                color: #FFFFFF;
+            QFrame#chatPanel {
+                background: #414B56;
+                border: 0;
+                border-radius: 0;
             }
             QLabel#panelHeading {
                 font-size: 13px;
@@ -701,23 +745,21 @@ class MainWindow(QMainWindow):
                 font-size: 12px;
                 padding-left: 4px;
             }
-            QLabel#statusPill {
-                background: #333C46;
-                color: #FFFFFF;
-                border: 1px solid #56616D;
-                border-radius: 10px;
-                padding: 4px 10px;
-                font-weight: 600;
-            }
             QListWidget,
-            QTextBrowser,
             QPlainTextEdit,
             QComboBox {
-                background: #1E242A;
+                background: #252C33;
                 color: #F4F4F5;
                 border: 1px solid #56616D;
                 border-radius: 6px;
                 padding: 6px;
+                selection-background-color: #FF4D00;
+            }
+            QTextBrowser#chatBrowser {
+                background: #414B56;
+                border: 0;
+                border-radius: 0;
+                padding: 0;
                 selection-background-color: #FF4D00;
             }
             QPlainTextEdit#promptEdit {
@@ -754,9 +796,31 @@ class MainWindow(QMainWindow):
                 border: 1px solid #56616D;
             }
             QFrame#inputFrame {
-                background: #1E242A;
+                background: #252C33;
                 border: 1px solid #56616D;
                 border-radius: 8px;
+            }
+            QFrame#bottomAlert {
+                background: #FFFFFF;
+                border: 1px solid #FFFFFF;
+                border-radius: 8px;
+            }
+            QLabel#bottomAlertLabel {
+                background: #FFFFFF;
+                color: #111827;
+                font-size: 13px;
+                font-weight: 600;
+            }
+            QPushButton#bottomAlertClose {
+                background: #FFFFFF;
+                border: 1px solid #D1D5DB;
+                border-radius: 13px;
+                color: #111827;
+                font-weight: 700;
+                padding: 0;
+            }
+            QPushButton#bottomAlertClose:hover {
+                background: #F3F4F6;
             }
             QPushButton {
                 color: #F4F4F5;
@@ -797,46 +861,8 @@ class MainWindow(QMainWindow):
             QPushButton#stopButton:hover {
                 background: #991B1B;
             }
-            .messageRow {
-                margin: 12px 0;
-            }
-            .userRow {
-                text-align: right;
-            }
-            .assistantRow {
-                text-align: center;
-            }
-            .message {
-                margin: 10px 0;
-                padding: 10px;
-                border-radius: 8px;
-            }
-            .userMessage {
-                background: #333C46;
-                border: 1px solid #FF4D00;
-            }
-            .agentMessage {
-                background: transparent;
-                border: 0;
-            }
-            .messageText {
-                color: #F4F4F5;
-                line-height: 1.35;
-            }
-            .agentMessage .messageText {
-                font-size: 20px;
-                line-height: 1.5;
-            }
-            .systemNote {
-                color: #B8C0C8;
-                font-style: italic;
-                margin: 8px 0;
-            }
             """
         )
-
-
-exports = MainWindow
 
 
 class SettingsDialog(QDialog):
@@ -858,6 +884,9 @@ class SettingsDialog(QDialog):
         title = QLabel("OpenRouter")
         title.setObjectName("panelHeading")
 
+        version_label = QLabel(f"Scout version {get_version()}")
+        version_label.setObjectName("settingsHint")
+
         self.api_key_input = QLineEdit()
         self.api_key_input.setObjectName("settingsInput")
         self.api_key_input.setEchoMode(QLineEdit.Password)
@@ -866,6 +895,10 @@ class SettingsDialog(QDialog):
 
         active_key_label = QLabel("Configured" if runtime.get("openrouter_api_key") else "Not configured")
         active_key_label.setObjectName("settingsHint")
+
+        key_hash = user_settings.get("openrouter_api_key_sha256") or runtime.get("openrouter_api_key")
+        key_hash_label = QLabel(f"Key fingerprint: {short_secret_hash(key_hash)}" if key_hash else "Key fingerprint: none")
+        key_hash_label.setObjectName("settingsHint")
 
         path_label = QLabel(f"Saved locally: {get_settings_path()}")
         path_label.setObjectName("settingsHint")
@@ -910,7 +943,9 @@ class SettingsDialog(QDialog):
         button_row.addWidget(save_button)
 
         layout.addWidget(title)
+        layout.addWidget(version_label)
         layout.addWidget(active_key_label)
+        layout.addWidget(key_hash_label)
         layout.addWidget(self.api_key_input)
         layout.addWidget(path_label)
         if env_label:

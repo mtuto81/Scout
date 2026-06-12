@@ -10,7 +10,7 @@ import tempfile
 import threading
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Tuple
 
 from PySide6.QtCore import QObject, QTimer, Signal, Slot
 

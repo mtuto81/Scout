@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -33,12 +34,27 @@ def save_user_settings(updates: dict) -> None:
     for key, value in updates.items():
         if value is None or value == "":
             settings.pop(key, None)
+            if key == "openrouter_api_key":
+                settings.pop("openrouter_api_key_sha256", None)
         else:
             settings[key] = value
+            if key == "openrouter_api_key":
+                settings["openrouter_api_key_sha256"] = hash_secret(value)
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     path.chmod(0o600)
+
+
+def hash_secret(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def short_secret_hash(value: str | None) -> str:
+    if not value:
+        return ""
+    digest = value if len(value) == 64 and all(char in "0123456789abcdef" for char in value.lower()) else hash_secret(value)
+    return f"sha256:{digest[:12]}"
 
 
 def _setting(key: str, env_name: str, default=None):

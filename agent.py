@@ -143,14 +143,6 @@ The assistant is running on a {platform.system()} machine.
             errors.append("tool_calls must be a list of tool call objects")
         return [], errors, saw_payload
 
-    def _parse_json_payload(self, response: str) -> Any:
-        text = response.strip()
-        for candidate in self._json_candidates(text):
-            parsed = self._loads_json_candidate(candidate)
-            if parsed is not None:
-                return parsed
-        return None
-
     def _json_candidates(self, text: str) -> List[str]:
         candidates = [text]
 
@@ -321,9 +313,17 @@ The assistant is running on a {platform.system()} machine.
 
     def _add_tool_results_to_history(self, tool_calls: List[Dict[str, Any]], tool_results: List[Dict[str, Any]]):
         self._add_message("assistant", json.dumps({"tool_calls": tool_calls}, ensure_ascii=False))
+        failed_tools = [result for result in tool_results if not result.get("success", False)]
+        recovery_instruction = ""
+        if failed_tools:
+            recovery_instruction = (
+                "\n\nRecovery instruction:\n"
+                "One or more tools failed. Do not finalize with only the failure unless the task is impossible or unsafe. "
+                "Try a safer corrected tool call, use a different read-only diagnostic command, or ask the user for the missing information."
+            )
         self._add_message(
             "user",
-            "Tool results:\n" + json.dumps(tool_results, ensure_ascii=False, indent=2),
+            "Tool results:\n" + json.dumps(tool_results, ensure_ascii=False, indent=2) + recovery_instruction,
         )
 
     def _add_message(self, role: str, content: str) -> None:
