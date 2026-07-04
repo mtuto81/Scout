@@ -1,5 +1,6 @@
 import asyncio
 import platform
+import openai
 from openai import AsyncOpenAI
 from config import get_llm_config
 from tool_manager import AsyncToolManager
@@ -23,7 +24,10 @@ class AsyncAIAgent:
         self.logger = Logger()
         self.event_callback = event_callback
         self.conversation_history: List[Dict[str, Any]] = []
-        self.max_iterations = 10
+        self.max_iterations = 40
+        self.max_history_messages = 20
+        self.max_parse_repairs = 1
+        self._tool_recovery_context: str = ""
 
     async def get_ai_response(self, prompt: str) -> str:
         self._add_message("user", prompt)
@@ -32,24 +36,33 @@ class AsyncAIAgent:
         except Exception:
             pass
 
+        tool_results = []
         for iteration in range(self.max_iterations):
-            self._emit_event(f"Agent thinking... iteration {iteration + 1}")
+            self._emit_event(f"Agent thinking...")
             ai_response = await self._get_ai_decision()
-            tool_calls = self._parse_tool_calls(ai_response)
+        
+            tool_calls = await self._parse_tool_calls(ai_response)
             if not tool_calls:
                 self._add_message("assistant", ai_response)
+                self._tool_recovery_context = ""
                 try:
                     self.logger.log({"final_response": ai_response})
                 except Exception:
                     pass
                 return ai_response
 
+            # Emit the AI's reasoning before the tool call JSON
+            reasoning = self._extract_reasoning(ai_response)
+            if reasoning:
+                self._emit_event(reasoning)
+
             self._emit_event(f"Executing {len(tool_calls)} tool(s)...")
             tool_results = await self._execute_tools_and_wait(tool_calls)
             self._add_tool_results_to_history(tool_calls, tool_results)
 
-        fallback_response = "I've reached my thinking limit. Let me provide what I have so far."
+        fallback_response = "Error: Maximum iterations reached without a final answer. Last tool results:\n" + json.dumps(tool_results, ensure_ascii=False, indent=2)
         self._add_message("assistant", fallback_response)
+        self._tool_recovery_context = ""
         return fallback_response
 
     async def _get_ai_decision(self) -> str:
@@ -60,40 +73,102 @@ You are Scout, a highly capable IT AI assistant with access to tools. You solve 
 The assistant is running on a {platform.system()} machine.
 
 ## Your Capabilities:
-- Think carefully before acting.
+- Think step by step before acting.
+- Explain your reasoning when you decide to call tools.
+- Make a plan if multiple steps or tools are needed, explain it to the  user and execute them iteratively.
 - You may call one or more tools per step.
-- Prefer safe read-only inspection tools before tools that change files or system state.
+
 - Ask the user before high-risk actions unless the tool itself asks for confirmation.
 - Always return results to the user, integrating tool outputs into a final answer.
-
+- All sudo should be done inter
 ## Available Tools
 {tool_schemas}
 
 ## Response Rules:
 1. If you can answer directly, do so without calling tools.
-2. If you need tools, respond ONLY with this JSON object and no markdown:
+2. It you need tools, explain your reasoning and which tools you will call before calling them.
+3. If you need tools, respond ONLY with this JSON object and no markdown:
 {{"tool_calls":[{{"tool":"tool_name","args":{{"arg_name":"value"}}}}]}}
-3. Use object-style args that match the tool schema. Use {{}} for tools with no arguments.
-4. After receiving tool results, summarize them and conclude.
-5. Do not claim a tool succeeded unless the tool result says success is true.
+4. Use object-style args that match the tool schema. Use {{}} for tools with no arguments.
+5. After receiving tool results, summarize them and conclude.
+6. Do not claim a tool succeeded unless the tool result says success is true.
 
 
 """
 
-        messages = [{"role": "system", "content": system_prompt}] + list(self.conversation_history)
+        messages = [{"role": "system", "content": system_prompt}]
+        if self._tool_recovery_context:
+            messages.append({"role": "system", "content": self._tool_recovery_context})
+        messages.extend(self.conversation_history)
 
-        response = await self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            temperature=0.1,
-        )
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                temperature=0.1,
+            )
+        except openai.AuthenticationError:
+            raise RuntimeError(
+                f"Authentication failed for backend '{self.backend}'. Check your API key in Settings."
+            )
+        except openai.RateLimitError:
+            raise RuntimeError(
+                f"Rate limit exceeded for backend '{self.backend}'. Wait a moment and try again."
+            )
+        except openai.APITimeoutError:
+            raise RuntimeError(
+                f"Request timed out for backend '{self.backend}'. Check your network connection."
+            )
+        except openai.APIConnectionError:
+            if self.backend == "local":
+                raise RuntimeError(
+                    "Cannot connect to the local backend. It may have been stopped due to inactivity. "
+                    "Try submitting your query again to restart it."
+                )
+            raise RuntimeError(
+                f"Cannot connect to backend '{self.backend}'. Check your network connection and backend URL in Settings."
+            )
+        except openai.APIError as e:
+            raise RuntimeError(
+                f"Backend '{self.backend}' returned an error: {e}"
+            )
 
         return response.choices[0].message.content
 
-    def _parse_tool_calls(self, response: str) -> List[Dict[str, Any]]:
+
+    async def _repair_tool_json(self, raw_response: str, error: str) -> str: 
+        repair_prompt = f"""
+            The previous response contained invalid tool call JSON.
+
+            Error:
+            {error}
+
+            Raw output:
+            {raw_response}
+
+            Return ONLY valid JSON in this format:
+            {{
+            "tool_calls": [
+                {{
+                "tool": "tool_name",
+                "args": {{}}
+                }}
+            ]
+            }}
+          """
+        response = await self.client.chat.completions.create(
+            model=self.model,
+            messages=[{"role": "system", "content": repair_prompt}],
+            temperature=0.0
+        )
+        return response.choices[0].message.content
+
+
+    async def _parse_tool_calls(self, response: str) -> List[Dict[str, Any]]:
         parse_errors = []
         saw_tool_payload = False
-
+        
+        # First attempt: parse raw response
         for candidate in self._json_candidates(response.strip()):
             parsed = self._loads_json_candidate(candidate)
             if parsed is None:
@@ -105,8 +180,20 @@ The assistant is running on a {platform.system()} machine.
                 return tool_calls
             parse_errors.extend(errors)
 
+        # Second attempt: if it looks like a tool call but failed, try LLM repair
         if self._looks_like_tool_payload(response):
             saw_tool_payload = True
+            error_msg = "; ".join(parse_errors) if parse_errors else "Invalid JSON structure"
+            repaired_response = await self._repair_tool_json(response, error_msg)
+            
+            for candidate in self._json_candidates(repaired_response.strip()):
+                parsed = self._loads_json_candidate(candidate)
+                if parsed is None:
+                    continue
+                tool_calls, errors, saw_payload = self._tool_calls_from_parsed(parsed)
+                if tool_calls:
+                    return tool_calls
+                parse_errors.extend(errors)
 
         if saw_tool_payload:
             if parse_errors:
@@ -288,52 +375,89 @@ The assistant is running on a {platform.system()} machine.
         return processed
 
     async def _execute_single_tool(self, tool_name: str, args: Any, tool_index: int) -> Dict[str, Any]:
-        try:
+        max_retries = 3
+        last_error = None
+        
+        for attempt in range(max_retries):
             try:
-                self.logger.log({"tool_call": {"name": tool_name, "args": args}})
-            except Exception:
-                pass
+                result = await self.tool_manager.execute_tool_call(tool_name, args)
 
-            result = await self.tool_manager.execute_tool_call(tool_name, args)
+                if result.get("success", False):
+                    return result
 
-            try:
-                self.logger.log({"tool_result": {"tool": tool_name, "result": result}})
-            except Exception:
-                pass
+                last_error = result.get("error") or result.get("result")
 
-            return result
+            except Exception as e:
+                last_error = str(e)
 
-        except Exception as e:
-            err = str(e)
-            try:
-                self.logger.log({"tool_error": {"tool": tool_name, "error": err}})
-            except Exception:
-                pass
-            return {"tool": tool_name, "args": args, "success": False, "result": err, "error": err}
+            # 🔁 small backoff
+            await asyncio.sleep(0.3 * (attempt + 1))
+
+        return {
+            "tool": tool_name,
+            "args": args,
+            "success": False,
+            "result": last_error,
+            "error": last_error,
+            "retried": True
+        }
+
 
     def _add_tool_results_to_history(self, tool_calls: List[Dict[str, Any]], tool_results: List[Dict[str, Any]]):
         self._add_message("assistant", json.dumps({"tool_calls": tool_calls}, ensure_ascii=False))
         failed_tools = [result for result in tool_results if not result.get("success", False)]
-        recovery_instruction = ""
-        if failed_tools:
-            recovery_instruction = (
-                "\n\nRecovery instruction:\n"
-                "One or more tools failed. Do not finalize with only the failure unless the task is impossible or unsafe. "
-                "Try a safer corrected tool call, use a different read-only diagnostic command, or ask the user for the missing information."
-            )
+        self._tool_recovery_context = self._build_recovery_context(tool_calls, tool_results) if failed_tools else ""
         self._add_message(
             "user",
-            "Tool results:\n" + json.dumps(tool_results, ensure_ascii=False, indent=2) + recovery_instruction,
+            "Tool results:\n" + json.dumps(tool_results, ensure_ascii=False, indent=2),
+        )
+        if failed_tools:
+            self._emit_event("Tool failure detected. Recovery guidance added to the next model turn.")
+
+    def _build_recovery_context(self, tool_calls: List[Dict[str, Any]], tool_results: List[Dict[str, Any]]) -> str:
+        failed_entries = []
+        for call, result in zip(tool_calls, tool_results):
+            if result.get("success", False):
+                continue
+            failed_entries.append(
+                {
+                    "tool": call.get("tool"),
+                    "args": call.get("args", {}),
+                    "error": result.get("error") or result.get("result") or "Unknown error",
+                }
+            )
+
+        if not failed_entries:
+            return ""
+
+        return (
+            "Recovery instruction:\n"
+            "One or more tools failed. Retry the task with a corrected or safer tool call, or ask the user for missing information if needed. "
+            "Do not finalize with only the failure unless the task is impossible or unsafe.\n"
+            "Failed tool details:\n"
+            + json.dumps(failed_entries, ensure_ascii=False, indent=2)
         )
 
     def _add_message(self, role: str, content: str) -> None:
         self.conversation_history.append({"role": role, "content": content})
+        if self.max_history_messages > 0 and len(self.conversation_history) > self.max_history_messages:
+            self.conversation_history = self.conversation_history[-self.max_history_messages:]
 
     def _emit_event(self, message: str) -> None:
         if self.event_callback:
             self.event_callback(message)
         else:
             print(message)
+
+    def _extract_reasoning(self, response: str) -> str:
+        for candidate in self._json_candidates(response):
+            pos = response.find(candidate)
+            if pos >= 0:
+                before = response[:pos].strip()
+                after = response[pos + len(candidate):].strip()
+                parts = [p for p in [before, after] if p]
+                return " ".join(parts) if parts else ""
+        return response.strip()
 
 
 async def main():

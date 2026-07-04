@@ -32,6 +32,10 @@ build/
 dist/
 *.spec.bak
 
+# Local model downloads
+*.gguf
+*.gguf.part
+
 # Local/editor state
 .idea/
 .vscode/
@@ -46,4 +50,3 @@ agent().py
 .DS_Store
 Thumbs.db
 bugs.md
-

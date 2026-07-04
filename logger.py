@@ -10,6 +10,11 @@ class Logger:
         if enabled is None:
             enabled = os.environ.get("SCOUT_ENABLE_LOGS") == "1" or not getattr(sys, "frozen", False)
         self.enabled = enabled
+        if not enabled and os.path.exists(self.log_file):
+            try:
+                os.remove(self.log_file)
+            except Exception:
+                pass
 
     def log(self, data):
         """Append a single JSON object as a newline to the log file (NDJSON)."""

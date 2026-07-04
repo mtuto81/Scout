@@ -36,6 +36,13 @@ For local Ollama:
 export SCOUT_BACKEND=ollama
 ```
 
+For direct local llama.cpp:
+
+```bash
+export SCOUT_BACKEND=local
+export SCOUT_LOCAL_MODEL_PATH=/path/to/model.gguf
+```
+
 ## Run
 
 ```bash
@@ -57,6 +64,10 @@ SCOUT_BACKEND=ollama ./scripts/scout
 ```
 
 The model is controlled by `OLLAMA_MODEL` or `AI_MODEL`.
+
+## Use llama.cpp Directly
+
+Set `SCOUT_BACKEND=local`, point `SCOUT_LOCAL_MODEL_PATH` at a GGUF file, then run Scout. The app starts a local OpenAI-compatible sidecar on `127.0.0.1` and talks to it through the existing agent client.
 
 ## Install Desktop Launcher
 

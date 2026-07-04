@@ -1,4 +1,5 @@
 openai
+llama-cpp-python
 PySide6
 psutil
 requests

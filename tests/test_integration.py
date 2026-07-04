@@ -12,6 +12,7 @@ Tests cover:
 import asyncio
 import json
 import pytest
+from types import SimpleNamespace
 from unittest.mock import Mock, AsyncMock, patch, MagicMock
 from agent import AsyncAIAgent
 from tool_manager import AsyncToolManager, ToolSpec
@@ -503,6 +504,40 @@ More text'''
                 
                 assert "8" in response
                 assert len(agent.conversation_history) > 2
+
+    @pytest.mark.asyncio
+    async def test_failed_tool_recovery_context_is_injected(self):
+        """Test failed tool results add a recovery instruction to the next model turn."""
+        with patch('config.get_llm_config') as mock_config:
+            mock_config.return_value = {
+                "api_key": "test-key",
+                "backend": "openai",
+                "model": "gpt-4",
+                "base_url": "https://api.openai.com/v1"
+            }
+
+            agent = AsyncAIAgent()
+            agent._tool_recovery_context = "Recovery instruction: retry safely."
+
+            captured = {}
+
+            async def fake_create(**kwargs):
+                captured.update(kwargs)
+                return SimpleNamespace(
+                    choices=[SimpleNamespace(message=SimpleNamespace(content="final answer"))]
+                )
+
+            agent.client.chat.completions.create = fake_create
+
+            response = await agent._get_ai_decision()
+
+            assert response == "final answer"
+            messages = captured["messages"]
+            assert messages[0]["role"] == "system"
+            assert any(
+                message["role"] == "system" and "Recovery instruction" in message["content"]
+                for message in messages
+            )
 
     @pytest.mark.asyncio
     async def test_max_iterations_limit(self):

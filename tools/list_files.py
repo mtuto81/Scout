@@ -2,7 +2,7 @@ import os
 from pathlib import Path
 
 
-WORKSPACE_ROOT = Path(os.environ.get("AGENT_WORKSPACE_ROOT", os.getcwd())).resolve()
+WORKSPACE_ROOT = Path("/", os.getcwd()).resolve()
 
 
 def safe_path(path):

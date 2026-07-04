@@ -5,9 +5,15 @@ from pathlib import Path
 
 
 DEFAULT_OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_MODEL = "nvidia/nemotron-3-ultra-550b-a55b:free"
+DEFAULT_OPENROUTER_MODEL = "google/gemma-4-26b-a4b-it:free"
 DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434/v1"
 DEFAULT_OLLAMA_MODEL = "gemma4:latest"
+DEFAULT_LOCAL_BASE_URL = "http://127.0.0.1:11435/v1"
+DEFAULT_LOCAL_MODEL_PATH = ""
+DEFAULT_LOCAL_CTX_SIZE = 4096
+DEFAULT_LOCAL_MAX_TOKENS = 768
+DEFAULT_LOCAL_THREADS = max(1, (os.cpu_count() or 2) - 1)
+DEFAULT_LOCAL_GPU_LAYERS = "auto"
 DEFAULT_UPDATE_MANIFEST_URL = "https://github.com/mtuto81/Scout/releases/latest/download/latest.json"
 
 
@@ -64,11 +70,29 @@ def _setting(key: str, env_name: str, default=None):
     return load_user_settings().get(key, default)
 
 
+def _int_setting(key: str, env_name: str, default: int) -> int:
+    value = _setting(key, env_name, default)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return int(default)
+
+
+def _local_model_label(model_path: str | None) -> str:
+    if not model_path:
+        return "local"
+    return Path(str(model_path)).name or "local"
+
+
 def get_runtime_settings() -> dict:
     backend = str(_setting("backend", "SCOUT_BACKEND", "openrouter")).strip().lower()
     openrouter_model = str(_setting("openrouter_model", "OPENROUTER_MODEL", DEFAULT_OPENROUTER_MODEL))
     ollama_model = str(_setting("ollama_model", "OLLAMA_MODEL", DEFAULT_OLLAMA_MODEL))
-    model = os.environ.get("AI_MODEL") or (ollama_model if backend == "ollama" else openrouter_model)
+    local_model_path = str(_setting("local_model_path", "SCOUT_LOCAL_MODEL_PATH", DEFAULT_LOCAL_MODEL_PATH)).strip()
+    local_model = os.environ.get("AI_MODEL") or _local_model_label(local_model_path)
+    model = os.environ.get("AI_MODEL") or (
+        local_model if backend == "local" else ollama_model if backend == "ollama" else openrouter_model
+    )
 
     return {
         "backend": backend,
@@ -80,6 +104,13 @@ def get_runtime_settings() -> dict:
         "ollama_base_url": str(_setting("ollama_base_url", "OLLAMA_BASE_URL", DEFAULT_OLLAMA_BASE_URL)),
         "ollama_model": ollama_model,
         "ollama_api_key": str(_setting("ollama_api_key", "OLLAMA_API_KEY", "ollama")),
+        "local_base_url": str(_setting("local_base_url", "SCOUT_LOCAL_BASE_URL", DEFAULT_LOCAL_BASE_URL)),
+        "local_model_path": local_model_path,
+        "local_ctx_size": _int_setting("local_ctx_size", "SCOUT_LOCAL_CTX_SIZE", DEFAULT_LOCAL_CTX_SIZE),
+        "local_max_tokens": _int_setting("local_max_tokens", "SCOUT_LOCAL_MAX_TOKENS", DEFAULT_LOCAL_MAX_TOKENS),
+        "local_threads": _int_setting("local_threads", "SCOUT_LOCAL_THREADS", DEFAULT_LOCAL_THREADS),
+        "local_gpu_layers": str(_setting("local_gpu_layers", "SCOUT_LOCAL_GPU_LAYERS", DEFAULT_LOCAL_GPU_LAYERS)).strip() or "auto",
+        "local_api_key": str(_setting("local_api_key", "SCOUT_LOCAL_API_KEY", "local")),
         "model": model,
         "update_manifest_url": str(_setting("update_manifest_url", "SCOUT_UPDATE_MANIFEST_URL", DEFAULT_UPDATE_MANIFEST_URL)).strip(),
         "update_check_interval_seconds": int(_setting("update_check_interval_seconds", "SCOUT_UPDATE_CHECK_INTERVAL_SECONDS", "21600")),
@@ -102,6 +133,14 @@ OLLAMA_BASE_URL = _RUNTIME_SETTINGS["ollama_base_url"]
 OLLAMA_MODEL = _RUNTIME_SETTINGS["ollama_model"]
 OLLAMA_API_KEY = _RUNTIME_SETTINGS["ollama_api_key"]
 
+LOCAL_BASE_URL = _RUNTIME_SETTINGS["local_base_url"]
+LOCAL_MODEL_PATH = _RUNTIME_SETTINGS["local_model_path"]
+LOCAL_CTX_SIZE = _RUNTIME_SETTINGS["local_ctx_size"]
+LOCAL_MAX_TOKENS = _RUNTIME_SETTINGS["local_max_tokens"]
+LOCAL_THREADS = _RUNTIME_SETTINGS["local_threads"]
+LOCAL_GPU_LAYERS = _RUNTIME_SETTINGS["local_gpu_layers"]
+LOCAL_API_KEY = _RUNTIME_SETTINGS["local_api_key"]
+
 # Backward-compatible model override.
 MODEL = _RUNTIME_SETTINGS["model"]
 
@@ -120,6 +159,14 @@ def get_llm_config():
             "model": settings["model"],
         }
 
+    if settings["backend"] == "local":
+        return {
+            "backend": "local",
+            "base_url": settings["local_base_url"],
+            "api_key": settings["local_api_key"],
+            "model": settings["model"],
+        }
+
     if settings["backend"] == "openrouter":
         return {
             "backend": "openrouter",
@@ -128,4 +175,4 @@ def get_llm_config():
             "model": settings["model"],
         }
 
-    raise RuntimeError(f"Unsupported SCOUT_BACKEND '{settings['backend']}'. Use 'openrouter' or 'ollama'.")
+    raise RuntimeError(f"Unsupported SCOUT_BACKEND '{settings['backend']}'. Use 'openrouter', 'ollama', or 'local'.")

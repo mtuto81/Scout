@@ -1,5 +1,9 @@
+import platform
+import psutil
+import socket
+
+
 async def get_sysinfo():
-    import platform, psutil, socket
     info = {
         "os": platform.system(),
         "version": platform.version(),

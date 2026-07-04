@@ -1,16 +1,14 @@
-import os
 import re
 from html import escape
 
-from PySide6.QtCore import QObject, QTimer, QSize, Qt, Signal, Slot
-from PySide6.QtGui import QFont, QKeyEvent
+from PySide6.QtCore import QTimer, QSize, Qt, Signal, Slot
+from PySide6.QtGui import QFont, QKeyEvent, QTextCursor
 from PySide6.QtWidgets import (
-    QDialog,
     QComboBox,
+    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QMainWindow,
     QMessageBox,
@@ -23,9 +21,10 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from app_metadata import get_version
-from config import MODEL, SCOUT_BACKEND, get_settings_path, get_runtime_settings, load_user_settings, save_user_settings, short_secret_hash
+from config import get_runtime_settings
 from gui.conversation_store import ConversationStore
+from gui.dialogs.settings_dialog import SettingsDialog
+from gui.dialogs.confirm_dialog import CommandConfirmDialog
 
 try:
     import qtawesome as qta
@@ -36,18 +35,6 @@ try:
     import markdown
 except Exception:
     markdown = None
-
-
-def _load_webengine_dialog_classes():
-    if os.environ.get("SCOUT_ENABLE_WEBENGINE_DIALOG") != "1":
-        return None, None
-
-    try:
-        from PySide6.QtWebChannel import QWebChannel
-        from PySide6.QtWebEngineWidgets import QWebEngineView
-    except Exception:
-        return None, None
-    return QWebChannel, QWebEngineView
 
 
 class PromptEdit(QPlainTextEdit):
@@ -82,6 +69,7 @@ class MainWindow(QMainWindow):
     prompt_submitted = Signal(str, int)
     stop_requested = Signal()
     command_confirmation_resolved = Signal(bool)
+    file_operation_confirmation_resolved = Signal(bool)
     update_check_requested = Signal()
     update_download_requested = Signal(dict)
     update_apply_requested = Signal(dict)
@@ -96,7 +84,6 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(960, 620)
         self.setFont(QFont("Inter", 10))
 
-        self._chat_items = []
         self._left_panel_visible = True
         self._sidebar_expanded_width = 260
         self._sidebar_collapsed_width = 54
@@ -181,6 +168,8 @@ class MainWindow(QMainWindow):
 
         self.conversation_list = QListWidget()
         self.conversation_list.setObjectName("conversationList")
+        self.conversation_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.conversation_list.customContextMenuRequested.connect(self._show_conversation_context_menu)
 
         self.new_chat_button = QPushButton("New conversation")
         self.new_chat_button.setObjectName("primaryButton")
@@ -230,7 +219,8 @@ class MainWindow(QMainWindow):
         self.prompt_edit.setObjectName("promptEdit")
         self.prompt_edit.setPlaceholderText("Ask me anything.")
 
-        self.input_model_label = QLabel(f"{SCOUT_BACKEND}: {MODEL}")
+        runtime = get_runtime_settings()
+        self.input_model_label = QLabel(f"{runtime['backend']}: {runtime['model']}")
         self.input_model_label.setObjectName("inputModelLabel")
 
         self.tool_approval_combo = QComboBox()
@@ -319,8 +309,7 @@ class MainWindow(QMainWindow):
         conversation_id = self._store.create_conversation()
         self._load_conversations(select_conversation_id=conversation_id)
         if select:
-            self._chat_items = []
-            self._render_chat_html()
+            self.chat_browser.clear()
             self.append_system_note("New conversation started.")
         return conversation_id
 
@@ -357,12 +346,44 @@ class MainWindow(QMainWindow):
             return
 
         self._current_conversation_id = conversation_id
-        self._chat_items = []
-        self._render_chat_html()
+        self.chat_browser.clear()
         for message in self._store.get_messages(conversation_id):
             if message["role"] in ("user", "assistant"):
                 self.append_message(message["role"], message["content"], persist=False)
         self._emit_conversation_context(conversation_id)
+
+    def _show_conversation_context_menu(self, position) -> None:
+        item = self.conversation_list.itemAt(position)
+        if item is None:
+            return
+
+        conversation_id = item.data(Qt.UserRole)
+        menu = QMenu(self)
+        delete_action = QAction("Delete", self)
+        delete_action.triggered.connect(lambda: self._delete_conversation(conversation_id, item))
+        menu.addAction(delete_action)
+        menu.exec(self.conversation_list.mapToGlobal(position))
+
+    def _delete_conversation(self, conversation_id: int, item) -> None:
+        reply = QMessageBox.question(
+            self,
+            "Delete Conversation",
+            "Are you sure you want to delete this conversation?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._store.delete_conversation(conversation_id)
+
+        # If we deleted the current conversation, clear the chat and select another
+        if conversation_id == self._current_conversation_id:
+            self._current_conversation_id = None
+            self.chat_browser.clear()
+            self.append_system_note("Conversation deleted.")
+
+        self._load_conversations()
 
     def _emit_conversation_context(self, conversation_id: int) -> None:
         messages = [
@@ -475,6 +496,16 @@ class MainWindow(QMainWindow):
         dialog = CommandConfirmDialog(command, self)
         self.command_confirmation_resolved.emit(dialog.exec() == QDialog.Accepted)
 
+    def show_file_operation_confirmation(self, description: str) -> None:
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("Confirm file operation")
+        dialog.setText("Scout wants to perform this file operation:")
+        dialog.setInformativeText(description)
+        dialog.setIcon(QMessageBox.Warning)
+        dialog.setStandardButtons(QMessageBox.Yes | QMessageBox.No)
+        dialog.setDefaultButton(QMessageBox.No)
+        self.file_operation_confirmation_resolved.emit(dialog.exec() == QMessageBox.Yes)
+
     def show_agent_response(self, response: str, conversation_id: int) -> None:
         self._store.add_message(conversation_id, "assistant", response)
         if conversation_id == self._current_conversation_id:
@@ -567,127 +598,115 @@ class MainWindow(QMainWindow):
         escaped = re.sub(r"(?m)^# (.+)$", r"<h1>\1</h1>", escaped)
         return escaped.replace("\n", "<br>")
 
+    _CHAT_CSS = """
+        body {
+            margin: 0 auto;
+            max-width: 78%;
+            background: #414B56;
+            color: #F4F4F5;
+            font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
+            padding: 0 12px;
+        }
+        .messageRow {
+            margin: 14px 0;
+            width: 100%;
+        }
+        .userRow {
+            text-align: right;
+        }
+        .assistantRow {
+            text-align: left;
+        }
+        .message {
+            padding: 12px;
+            border-radius: 14px;
+            display: inline-block;
+        }
+        .userMessage {
+            background: #272c30;
+            border: 1px solid #687684;
+            border-radius: 16px;
+            max-width: 62%;
+            text-align: right;
+        }
+        .agentMessage {
+            background: transparent;
+            border: 0;
+            display: block;
+            max-width: 100%;
+            text-align: left;
+        }
+        .messageText {
+            color: #F4F4F5;
+            line-height: 1.35;
+        }
+        .messageText p {
+            margin: 0 0 12px 0;
+        }
+        .messageText p:last-child {
+            margin-bottom: 0;
+        }
+        .messageText pre {
+            background: #12171C;
+            border: 1px solid #56616D;
+            border-radius: 8px;
+            overflow-x: auto;
+            padding: 12px;
+            white-space: pre-wrap;
+        }
+        .messageText code {
+            background: #12171C;
+            border-radius: 4px;
+            color: #FFD2C2;
+            font-family: "JetBrains Mono", "Fira Code", monospace;
+            padding: 2px 4px;
+        }
+        .messageText pre code {
+            background: transparent;
+            padding: 0;
+        }
+        .messageText h1, .messageText h2, .messageText h3 {
+            color: #FFFFFF;
+            margin: 12px 0 8px 0;
+        }
+        .messageText ul, .messageText ol {
+            margin: 8px 0 12px 24px;
+        }
+        .messageText blockquote {
+            border-left: 3px solid #FF4D00;
+            color: #DADDE1;
+            margin: 10px 0;
+            padding-left: 12px;
+        }
+        .agentMessage .messageText {
+            font-size: 20px;
+            line-height: 1.5;
+        }
+        .userMessage .messageText {
+            font-size: 20px;
+        }
+        .systemNote {
+            color: #B8C0C8;
+            font-style: italic;
+            margin: 10px 0;
+            text-align: center;
+        }
+    """
+
+    def _init_chat_document(self) -> None:
+        if self.chat_browser.document().characterCount() > 1:
+            return
+        self.chat_browser.setHtml(
+            f"<!doctype html><html><head><style>{__class__._CHAT_CSS}</style></head><body></body></html>"
+        )
+
     def _append_chat_html(self, html: str) -> None:
-        self._chat_items.append(html)
-        self._render_chat_html()
+        self._init_chat_document()
+        cursor = self.chat_browser.textCursor()
+        cursor.movePosition(QTextCursor.End)
+        cursor.insertHtml(html)
         scrollbar = self.chat_browser.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
-
-    def _render_chat_html(self) -> None:
-        items_html = "\n".join(self._chat_items)
-        self.chat_browser.document().setDefaultStyleSheet("body { background: #414B56; }")
-        self.chat_browser.setHtml(
-            f"""
-            <!doctype html>
-            <html>
-            <head>
-            <style>
-                body {{
-                    margin: 0;
-                    background: #414B56;
-                    color: #F4F4F5;
-                    font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
-                }}
-                table.chatWrap {{
-                    margin-left: auto;
-                    margin-right: auto;
-                }}
-                .messageRow {{
-                    margin: 14px 0;
-                    width: 100%;
-                }}
-                .userRow {{
-                    text-align: right;
-                }}
-                .assistantRow {{
-                    text-align: center;
-                }}
-                .message {{
-                    padding: 12px;
-                    border-radius: 14px;
-                    display: inline-block;
-                }}
-                .userMessage {{
-                    background: #272c30;
-                    border: 1px solid #687684;
-                    border-radius: 16px;
-                    max-width: 62%;
-                    text-align: right;
-                }}
-                .agentMessage {{
-                    background: transparent;
-                    border: 0;
-                    display: block;
-                    margin-left: auto;
-                    margin-right: auto;
-                    max-width: 78%;
-                    text-align: left;
-                }}
-                .messageText {{
-                    color: #F4F4F5;
-                    line-height: 1.35;
-                }}
-                .messageText p {{
-                    margin: 0 0 12px 0;
-                }}
-                .messageText p:last-child {{
-                    margin-bottom: 0;
-                }}
-                .messageText pre {{
-                    background: #12171C;
-                    border: 1px solid #56616D;
-                    border-radius: 8px;
-                    overflow-x: auto;
-                    padding: 12px;
-                    white-space: pre-wrap;
-                }}
-                .messageText code {{
-                    background: #12171C;
-                    border-radius: 4px;
-                    color: #FFD2C2;
-                    font-family: "JetBrains Mono", "Fira Code", monospace;
-                    padding: 2px 4px;
-                }}
-                .messageText pre code {{
-                    background: transparent;
-                    padding: 0;
-                }}
-                .messageText h1, .messageText h2, .messageText h3 {{
-                    color: #FFFFFF;
-                    margin: 12px 0 8px 0;
-                }}
-                .messageText ul, .messageText ol {{
-                    margin: 8px 0 12px 24px;
-                }}
-                .messageText blockquote {{
-                    border-left: 3px solid #FF4D00;
-                    color: #DADDE1;
-                    margin: 10px 0;
-                    padding-left: 12px;
-                }}
-                .agentMessage .messageText {{
-                    font-size: 20px;
-                    line-height: 1.5;
-                }}
-                .userMessage .messageText {{
-                    font-size: 14px;
-                }}
-                .systemNote {{
-                    color: #B8C0C8;
-                    font-style: italic;
-                    margin: 10px 0;
-                    text-align: center;
-                }}
-            </style>
-            </head>
-            <body>
-                <table class="chatWrap" width="78%" cellspacing="0" cellpadding="0" align="center">
-                    <tr><td>{items_html}</td></tr>
-                </table>
-            </body>
-            </html>
-            """
-        )
 
     def _toggle_left_panel(self) -> None:
         self._left_panel_visible = not self._left_panel_visible
@@ -863,323 +882,3 @@ class MainWindow(QMainWindow):
             }
             """
         )
-
-
-class SettingsDialog(QDialog):
-    update_check_requested = Signal()
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setModal(True)
-        self.resize(560, 280)
-
-        runtime = get_runtime_settings()
-        user_settings = load_user_settings()
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(12)
-
-        title = QLabel("OpenRouter")
-        title.setObjectName("panelHeading")
-
-        version_label = QLabel(f"Scout version {get_version()}")
-        version_label.setObjectName("settingsHint")
-
-        self.api_key_input = QLineEdit()
-        self.api_key_input.setObjectName("settingsInput")
-        self.api_key_input.setEchoMode(QLineEdit.Password)
-        self.api_key_input.setPlaceholderText("OpenRouter API key")
-        self.api_key_input.setText(user_settings.get("openrouter_api_key", ""))
-
-        active_key_label = QLabel("Configured" if runtime.get("openrouter_api_key") else "Not configured")
-        active_key_label.setObjectName("settingsHint")
-
-        key_hash = user_settings.get("openrouter_api_key_sha256") or runtime.get("openrouter_api_key")
-        key_hash_label = QLabel(f"Key fingerprint: {short_secret_hash(key_hash)}" if key_hash else "Key fingerprint: none")
-        key_hash_label.setObjectName("settingsHint")
-
-        path_label = QLabel(f"Saved locally: {get_settings_path()}")
-        path_label.setObjectName("settingsHint")
-        path_label.setWordWrap(True)
-
-        if "OPENROUTER_API_KEY" in os.environ:
-            env_label = QLabel("OPENROUTER_API_KEY is set in the environment and overrides the saved key.")
-            env_label.setObjectName("settingsHint")
-            env_label.setWordWrap(True)
-        else:
-            env_label = None
-
-        action_row = QHBoxLayout()
-        action_row.setContentsMargins(0, 0, 0, 0)
-        action_row.setSpacing(8)
-
-        check_updates_button = QPushButton("Check updates")
-        check_updates_button.setObjectName("secondaryButton")
-        check_updates_button.clicked.connect(self.update_check_requested.emit)
-
-        clear_button = QPushButton("Clear key")
-        clear_button.setObjectName("secondaryButton")
-        clear_button.clicked.connect(self._clear_key)
-
-        action_row.addWidget(check_updates_button)
-        action_row.addStretch(1)
-        action_row.addWidget(clear_button)
-
-        button_row = QHBoxLayout()
-        button_row.setContentsMargins(0, 0, 0, 0)
-        button_row.addStretch(1)
-
-        cancel_button = QPushButton("Cancel")
-        cancel_button.setObjectName("secondaryButton")
-        cancel_button.clicked.connect(self.reject)
-
-        save_button = QPushButton("Save")
-        save_button.setObjectName("primaryButton")
-        save_button.clicked.connect(self._save)
-
-        button_row.addWidget(cancel_button)
-        button_row.addWidget(save_button)
-
-        layout.addWidget(title)
-        layout.addWidget(version_label)
-        layout.addWidget(active_key_label)
-        layout.addWidget(key_hash_label)
-        layout.addWidget(self.api_key_input)
-        layout.addWidget(path_label)
-        if env_label:
-            layout.addWidget(env_label)
-        layout.addLayout(action_row)
-        layout.addStretch(1)
-        layout.addLayout(button_row)
-
-        self.setStyleSheet(
-            """
-            QDialog {
-                background: #252C33;
-                color: #F4F4F5;
-            }
-            QLabel#panelHeading {
-                font-size: 15px;
-                font-weight: 700;
-                color: #FFFFFF;
-            }
-            QLabel#settingsHint {
-                color: #B8C0C8;
-                font-size: 12px;
-            }
-            QLineEdit#settingsInput {
-                background: #1E242A;
-                color: #F4F4F5;
-                border: 1px solid #56616D;
-                border-radius: 6px;
-                padding: 10px;
-                selection-background-color: #FF4D00;
-            }
-            QPushButton {
-                color: #F4F4F5;
-                background: #333C46;
-                border: 1px solid #56616D;
-                border-radius: 6px;
-                padding: 8px 14px;
-                font-weight: 600;
-            }
-            QPushButton#primaryButton {
-                color: #FFFFFF;
-                background: #FF4D00;
-                border-color: #FF4D00;
-            }
-            QPushButton#secondaryButton {
-                color: #F4F4F5;
-                background: #252C33;
-                border-color: #56616D;
-            }
-            """
-        )
-
-    def _clear_key(self) -> None:
-        self.api_key_input.clear()
-
-    def _save(self) -> None:
-        save_user_settings({"openrouter_api_key": self.api_key_input.text().strip()})
-        self.accept()
-
-
-class CommandConfirmDialog(QDialog):
-    def __init__(self, command: str, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Confirm command")
-        self.setModal(True)
-        self.resize(620, 320)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(18, 18, 18, 18)
-        layout.setSpacing(14)
-
-        html = f"""
-            <!doctype html>
-            <html>
-            <head>
-            <script src="qrc:///qtwebchannel/qwebchannel.js"></script>
-            <script>
-                let bridge = null;
-                document.addEventListener("DOMContentLoaded", function() {{
-                    if (typeof QWebChannel !== "undefined" && window.qt) {{
-                        new QWebChannel(qt.webChannelTransport, function(channel) {{
-                            bridge = channel.objects.bridge;
-                        }});
-                    }}
-                }});
-                function approveCommand() {{
-                    if (bridge) bridge.approve();
-                }}
-                function denyCommand() {{
-                    if (bridge) bridge.deny();
-                }}
-            </script>
-            <style>
-                body {{
-                    background: #252C33;
-                    color: #F4F4F5;
-                    font-family: system-ui, sans-serif;
-                    margin: 0;
-                }}
-                .title {{
-                    color: #FFFFFF;
-                    font-size: 22px;
-                    font-weight: 700;
-                    margin-bottom: 8px;
-                }}
-                .subtitle {{
-                    color: #B8C0C8;
-                    font-size: 13px;
-                    margin-bottom: 16px;
-                }}
-                .command {{
-                    background: #1E242A;
-                    border: 1px solid #FF4D00;
-                    border-radius: 8px;
-                    color: #FFFFFF;
-                    font-family: monospace;
-                    font-size: 14px;
-                    padding: 12px;
-                    white-space: pre-wrap;
-                }}
-                .warning {{
-                    color: #FFB199;
-                    margin-top: 14px;
-                    font-size: 13px;
-                }}
-                .actions {{
-                    display: flex;
-                    justify-content: flex-end;
-                    gap: 10px;
-                    margin-top: 22px;
-                }}
-                button {{
-                    border-radius: 6px;
-                    border: 1px solid #56616D;
-                    cursor: pointer;
-                    font-weight: 700;
-                    padding: 10px 16px;
-                }}
-                .deny {{
-                    background: #252C33;
-                    color: #F4F4F5;
-                }}
-                .approve {{
-                    background: #FF4D00;
-                    border-color: #FF4D00;
-                    color: #FFFFFF;
-                }}
-            </style>
-            </head>
-            <body>
-                <div class="title">Command approval</div>
-                <div class="subtitle">Scout wants to run this command on your machine.</div>
-                <div class="command">{escape(command)}</div>
-                <div class="warning">Only approve this if you understand the command and trust the current task.</div>
-                <div class="actions">
-                    <button class="deny" onclick="denyCommand()">Deny</button>
-                    <button class="approve" onclick="approveCommand()">Approve</button>
-                </div>
-            </body>
-            </html>
-            """
-
-        QWebChannel, QWebEngineView = _load_webengine_dialog_classes()
-        if QWebEngineView and QWebChannel:
-            self._bridge = CommandConfirmBridge(self)
-            self._channel = QWebChannel(self)
-            self._channel.registerObject("bridge", self._bridge)
-            body = QWebEngineView()
-            body.page().setWebChannel(self._channel)
-            body.setHtml(html)
-            layout.addWidget(body, 1)
-        else:
-            body = QTextBrowser()
-            body.setObjectName("commandDialogBody")
-            body.setOpenExternalLinks(False)
-            body.setHtml(html)
-
-            button_row = QHBoxLayout()
-            button_row.addStretch(1)
-
-            deny_button = QPushButton("Deny")
-            deny_button.setObjectName("secondaryButton")
-            deny_button.clicked.connect(self.reject)
-
-            approve_button = QPushButton("Approve")
-            approve_button.setObjectName("primaryButton")
-            approve_button.clicked.connect(self.accept)
-
-            button_row.addWidget(deny_button)
-            button_row.addWidget(approve_button)
-
-            layout.addWidget(body, 1)
-            layout.addLayout(button_row)
-
-        self.setStyleSheet(
-            """
-            QDialog {
-                background: #252C33;
-            }
-            QTextBrowser#commandDialogBody {
-                background: #252C33;
-                border: 0;
-            }
-            QPushButton {
-                color: #F4F4F5;
-                background: #333C46;
-                border: 1px solid #56616D;
-                border-radius: 6px;
-                padding: 8px 16px;
-                font-weight: 600;
-            }
-            QPushButton#primaryButton {
-                color: #FFFFFF;
-                background: #FF4D00;
-                border-color: #FF4D00;
-            }
-            QPushButton#secondaryButton {
-                color: #F4F4F5;
-                background: #252C33;
-                border-color: #56616D;
-            }
-            """
-        )
-
-
-class CommandConfirmBridge(QObject):
-    def __init__(self, dialog: CommandConfirmDialog):
-        super().__init__(dialog)
-        self.dialog = dialog
-
-    @Slot()
-    def approve(self) -> None:
-        self.dialog.accept()
-
-    @Slot()
-    def deny(self) -> None:
-        self.dialog.reject()

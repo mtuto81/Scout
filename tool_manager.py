@@ -100,7 +100,11 @@ class AsyncToolManager:
                 continue
 
             for tool_def in getattr(module, "TOOLS", []):
-                self.register(tool_def)
+                try:
+                    self.register(tool_def)
+                except Exception as exc:
+                    name = tool_def.get("name", "unknown") if isinstance(tool_def, dict) else "unknown"
+                    print(f"[tool-manager] skipped tool '{name}' in {filename}: {exc}")
 
         self._loaded = True
 
