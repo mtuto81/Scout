@@ -73,7 +73,7 @@ jobs:
 
       - name: Validate Python files
         run: |
-          python -m py_compile agent.py tool_manager.py config.py app_metadata.py gui_app.py gui/main_windows.py gui/agent_worker.py gui/updater.py build_linux_executable.py install_linux_desktop.py packaging/linux/create_installer.py
+          python -m py_compile agent.py tool_manager.py config.py app_metadata.py gui_app.py gui/main_windows.py gui/transcript.py gui/window_styles.py gui/widgets/conversation_row.py gui/widgets/prompt_edit.py gui/agent_worker.py gui/updater.py build_linux_executable.py install_linux_desktop.py packaging/linux/create_installer.py
 
       - name: Build executable
         run: |
