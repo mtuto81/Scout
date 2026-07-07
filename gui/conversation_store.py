@@ -21,7 +21,9 @@ class ConversationStore:
         self._init_db()
 
     def _connect(self):
-        return sqlite3.connect(self.db_path)
+        conn = sqlite3.connect(self.db_path)
+        conn.execute("PRAGMA foreign_keys = ON")
+        return conn
 
     def _init_db(self) -> None:
         with self._connect() as conn:
@@ -119,3 +121,9 @@ class ConversationStore:
         title = " ".join(content.split())[:60] or "New chat"
         self.update_title(conversation_id, title)
         return title
+
+    def delete_conversation(self, conversation_id: int) -> bool:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+            cursor = conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+            return cursor.rowcount > 0

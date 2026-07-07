@@ -1,8 +1,5 @@
-import re
-from html import escape
-
-from PySide6.QtCore import QTimer, QSize, Qt, Signal, Slot
-from PySide6.QtGui import QFont, QKeyEvent, QTextCursor
+from PySide6.QtCore import QSize, Qt, Signal, Slot
+from PySide6.QtGui import QFont, QTextBlockFormat, QTextCursor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -10,9 +7,9 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMessageBox,
-    QPlainTextEdit,
     QPushButton,
     QSizePolicy,
     QStyle,
@@ -25,44 +22,15 @@ from config import get_runtime_settings
 from gui.conversation_store import ConversationStore
 from gui.dialogs.settings_dialog import SettingsDialog
 from gui.dialogs.confirm_dialog import CommandConfirmDialog
+from gui.transcript import CHAT_CSS, message_html, system_note_html
+from gui.window_styles import MAIN_WINDOW_STYLE
+from gui.widgets.conversation_row import ConversationRowWidget
+from gui.widgets.prompt_edit import PromptEdit
 
 try:
     import qtawesome as qta
 except Exception:
     qta = None
-
-try:
-    import markdown
-except Exception:
-    markdown = None
-
-
-class PromptEdit(QPlainTextEdit):
-    submit_requested = Signal()
-
-    def __init__(self):
-        super().__init__()
-        self.document().setDocumentMargin(0)
-        self.setLineWrapMode(QPlainTextEdit.WidgetWidth)
-        self.setVerticalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        self.setFixedHeight(42)
-        self.setMaximumHeight(96)
-        self.textChanged.connect(self._resize_to_content)
-        QTimer.singleShot(0, self._resize_to_content)
-
-    def keyPressEvent(self, event: QKeyEvent) -> None:
-        is_enter = event.key() in (Qt.Key_Return, Qt.Key_Enter)
-        if is_enter and not event.modifiers() & Qt.ShiftModifier:
-            self.submit_requested.emit()
-            return
-        super().keyPressEvent(event)
-
-    def _resize_to_content(self) -> None:
-        document_height = int(self.document().size().height())
-        margins = self.contentsMargins()
-        target_height = max(42, min(96, document_height + margins.top() + margins.bottom() + 18))
-        self.setFixedHeight(target_height)
 
 
 class MainWindow(QMainWindow):
@@ -168,8 +136,6 @@ class MainWindow(QMainWindow):
 
         self.conversation_list = QListWidget()
         self.conversation_list.setObjectName("conversationList")
-        self.conversation_list.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.conversation_list.customContextMenuRequested.connect(self._show_conversation_context_menu)
 
         self.new_chat_button = QPushButton("New conversation")
         self.new_chat_button.setObjectName("primaryButton")
@@ -289,9 +255,7 @@ class MainWindow(QMainWindow):
         self._store.add_message(conversation_id, "user", prompt)
         title = self._store.maybe_title_from_first_user_message(conversation_id, prompt)
         if title:
-            current_item = self.conversation_list.currentItem()
-            if current_item and current_item.data(Qt.UserRole) == conversation_id:
-                current_item.setText(title)
+            self._update_conversation_title(conversation_id, title)
         self.set_busy(True)
         self.prompt_submitted.emit(prompt, conversation_id)
 
@@ -319,9 +283,15 @@ class MainWindow(QMainWindow):
 
         conversations = self._store.list_conversations()
         for conversation in conversations:
-            self.conversation_list.addItem(conversation["title"])
-            item = self.conversation_list.item(self.conversation_list.count() - 1)
+            item = QListWidgetItem()
             item.setData(Qt.UserRole, conversation["id"])
+            item.setSizeHint(QSize(0, 42))
+            self.conversation_list.addItem(item)
+
+            row = ConversationRowWidget(conversation["id"], conversation["title"], self.conversation_list)
+            row.activated.connect(self._select_conversation_by_id)
+            row.delete_requested.connect(self._delete_conversation)
+            self.conversation_list.setItemWidget(item, row)
 
         self._loading_conversation = False
 
@@ -331,6 +301,7 @@ class MainWindow(QMainWindow):
             return
 
         target_id = select_conversation_id or conversations[0]["id"]
+        self._update_conversation_row_selection(target_id)
         for row in range(self.conversation_list.count()):
             item = self.conversation_list.item(row)
             if item.data(Qt.UserRole) == target_id:
@@ -346,44 +317,49 @@ class MainWindow(QMainWindow):
             return
 
         self._current_conversation_id = conversation_id
+        self._update_conversation_row_selection(conversation_id)
         self.chat_browser.clear()
         for message in self._store.get_messages(conversation_id):
             if message["role"] in ("user", "assistant"):
                 self.append_message(message["role"], message["content"], persist=False)
         self._emit_conversation_context(conversation_id)
 
-    def _show_conversation_context_menu(self, position) -> None:
-        item = self.conversation_list.itemAt(position)
-        if item is None:
-            return
+    def _select_conversation_by_id(self, conversation_id: int) -> None:
+        for row in range(self.conversation_list.count()):
+            item = self.conversation_list.item(row)
+            if item.data(Qt.UserRole) == conversation_id:
+                self.conversation_list.setCurrentRow(row)
+                return
 
-        conversation_id = item.data(Qt.UserRole)
-        menu = QMenu(self)
-        delete_action = QAction("Delete", self)
-        delete_action.triggered.connect(lambda: self._delete_conversation(conversation_id, item))
-        menu.addAction(delete_action)
-        menu.exec(self.conversation_list.mapToGlobal(position))
-
-    def _delete_conversation(self, conversation_id: int, item) -> None:
+    def _delete_conversation(self, conversation_id: int) -> None:
         reply = QMessageBox.question(
             self,
             "Delete Conversation",
-            "Are you sure you want to delete this conversation?",
+            "Delete this conversation?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.No,
         )
         if reply != QMessageBox.Yes:
             return
 
-        self._store.delete_conversation(conversation_id)
+        if not self._store.delete_conversation(conversation_id):
+            return
 
-        # If we deleted the current conversation, clear the chat and select another
-        if conversation_id == self._current_conversation_id:
+        if self._current_conversation_id == conversation_id:
             self._current_conversation_id = None
             self.chat_browser.clear()
-            self.append_system_note("Conversation deleted.")
 
         self._load_conversations()
+
+    def _update_conversation_title(self, conversation_id: int, title: str) -> None:
+        for row in range(self.conversation_list.count()):
+            item = self.conversation_list.item(row)
+            if item.data(Qt.UserRole) != conversation_id:
+                continue
+            widget = self.conversation_list.itemWidget(item)
+            if widget and hasattr(widget, "set_title"):
+                widget.set_title(title)
+            break
 
     def _emit_conversation_context(self, conversation_id: int) -> None:
         messages = [
@@ -393,23 +369,21 @@ class MainWindow(QMainWindow):
         ]
         self.conversation_context_changed.emit(messages)
 
+    def _update_conversation_row_selection(self, selected_id: int | None) -> None:
+        for row in range(self.conversation_list.count()):
+            item = self.conversation_list.item(row)
+            widget = self.conversation_list.itemWidget(item)
+            if widget and hasattr(widget, "set_selected"):
+                widget.set_selected(item.data(Qt.UserRole) == selected_id)
+
     def append_message(self, role: str, content: str, persist: bool = False) -> None:
-        css_class = "userMessage" if role == "user" else "agentMessage"
-        content_html = self._message_content_html(role, content)
-        html = (
-            f"<div class='messageRow {role}Row'>"
-            f"<div class='message {css_class}'>"
-            f"<div class='messageText'>{content_html}</div>"
-            "</div>"
-            "</div>"
-        )
-        self._append_chat_html(html)
+        alignment = Qt.AlignRight if role == "user" else Qt.AlignHCenter
+        self._append_chat_html(message_html(role, content), alignment)
         if persist and self._current_conversation_id is not None:
             self._store.add_message(self._current_conversation_id, role, content)
 
     def append_system_note(self, content: str) -> None:
-        html = f"<div class='systemNote'>{escape(content)}</div>"
-        self._append_chat_html(html)
+        self._append_chat_html(system_note_html(content), Qt.AlignHCenter)
 
     def append_flow_event(self, content: str, conversation_id: int = -1) -> None:
         if conversation_id != -1 and conversation_id != self._current_conversation_id:
@@ -575,136 +549,29 @@ class MainWindow(QMainWindow):
     def _standard_icon(self, icon: QStyle.StandardPixmap):
         return self.style().standardIcon(icon)
 
-    def _message_content_html(self, role: str, content: str) -> str:
-        if role == "assistant":
-            return self._markdown_to_html(content)
-        return escape(content).replace("\n", "<br>")
-
-    def _markdown_to_html(self, content: str) -> str:
-        if markdown:
-            return markdown.markdown(
-                content,
-                extensions=["fenced_code", "tables", "nl2br"],
-                output_format="html5",
-            )
-        return self._basic_markdown_to_html(content)
-
-    def _basic_markdown_to_html(self, content: str) -> str:
-        escaped = escape(content)
-        escaped = re.sub(r"`([^`]+)`", r"<code>\1</code>", escaped)
-        escaped = re.sub(r"\*\*([^*]+)\*\*", r"<strong>\1</strong>", escaped)
-        escaped = re.sub(r"(?m)^### (.+)$", r"<h3>\1</h3>", escaped)
-        escaped = re.sub(r"(?m)^## (.+)$", r"<h2>\1</h2>", escaped)
-        escaped = re.sub(r"(?m)^# (.+)$", r"<h1>\1</h1>", escaped)
-        return escaped.replace("\n", "<br>")
-
-    _CHAT_CSS = """
-        body {
-            margin: 0 auto;
-            max-width: 78%;
-            background: #414B56;
-            color: #F4F4F5;
-            font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
-            padding: 0 12px;
-        }
-        .messageRow {
-            margin: 14px 0;
-            width: 100%;
-        }
-        .userRow {
-            text-align: right;
-        }
-        .assistantRow {
-            text-align: left;
-        }
-        .message {
-            padding: 12px;
-            border-radius: 14px;
-            display: inline-block;
-        }
-        .userMessage {
-            background: #272c30;
-            border: 1px solid #687684;
-            border-radius: 16px;
-            max-width: 62%;
-            text-align: right;
-        }
-        .agentMessage {
-            background: transparent;
-            border: 0;
-            display: block;
-            max-width: 100%;
-            text-align: left;
-        }
-        .messageText {
-            color: #F4F4F5;
-            line-height: 1.35;
-        }
-        .messageText p {
-            margin: 0 0 12px 0;
-        }
-        .messageText p:last-child {
-            margin-bottom: 0;
-        }
-        .messageText pre {
-            background: #12171C;
-            border: 1px solid #56616D;
-            border-radius: 8px;
-            overflow-x: auto;
-            padding: 12px;
-            white-space: pre-wrap;
-        }
-        .messageText code {
-            background: #12171C;
-            border-radius: 4px;
-            color: #FFD2C2;
-            font-family: "JetBrains Mono", "Fira Code", monospace;
-            padding: 2px 4px;
-        }
-        .messageText pre code {
-            background: transparent;
-            padding: 0;
-        }
-        .messageText h1, .messageText h2, .messageText h3 {
-            color: #FFFFFF;
-            margin: 12px 0 8px 0;
-        }
-        .messageText ul, .messageText ol {
-            margin: 8px 0 12px 24px;
-        }
-        .messageText blockquote {
-            border-left: 3px solid #FF4D00;
-            color: #DADDE1;
-            margin: 10px 0;
-            padding-left: 12px;
-        }
-        .agentMessage .messageText {
-            font-size: 20px;
-            line-height: 1.5;
-        }
-        .userMessage .messageText {
-            font-size: 20px;
-        }
-        .systemNote {
-            color: #B8C0C8;
-            font-style: italic;
-            margin: 10px 0;
-            text-align: center;
-        }
-    """
-
     def _init_chat_document(self) -> None:
         if self.chat_browser.document().characterCount() > 1:
             return
         self.chat_browser.setHtml(
-            f"<!doctype html><html><head><style>{__class__._CHAT_CSS}</style></head><body></body></html>"
+            f"<!doctype html><html><head><style>{CHAT_CSS}</style></head><body></body></html>"
         )
 
-    def _append_chat_html(self, html: str) -> None:
+    def _append_chat_html(self, html: str, alignment: Qt.AlignmentFlag = Qt.AlignLeft) -> None:
         self._init_chat_document()
         cursor = self.chat_browser.textCursor()
         cursor.movePosition(QTextCursor.End)
+        if self.chat_browser.document().characterCount() > 1:
+            cursor.insertBlock()
+
+        block_format = QTextBlockFormat()
+        block_format.setAlignment(alignment)
+        cursor.setBlockFormat(block_format)
         cursor.insertHtml(html)
+
+        cursor.insertBlock()
+        reset_format = QTextBlockFormat()
+        reset_format.setAlignment(Qt.AlignLeft)
+        cursor.setBlockFormat(reset_format)
         scrollbar = self.chat_browser.verticalScrollBar()
         scrollbar.setValue(scrollbar.maximum())
 
@@ -733,152 +600,4 @@ class MainWindow(QMainWindow):
                 button.setFixedSize(34, 34)
 
     def _apply_styles(self) -> None:
-        self.setStyleSheet(
-            """
-            QMainWindow {
-                background: #414B56;
-                color: #F4F4F5;
-                font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
-            }
-            QWidget {
-                color: #F4F4F5;
-                font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
-            }
-            QFrame#sidePanel {
-                background: #252C33;
-                border: 1px solid #56616D;
-                border-radius: 8px;
-            }
-            QFrame#chatPanel {
-                background: #414B56;
-                border: 0;
-                border-radius: 0;
-            }
-            QLabel#panelHeading {
-                font-size: 13px;
-                font-weight: 700;
-                color: #F4F4F5;
-            }
-            QLabel#inputModelLabel {
-                color: #B8C0C8;
-                font-size: 12px;
-                padding-left: 4px;
-            }
-            QListWidget,
-            QPlainTextEdit,
-            QComboBox {
-                background: #252C33;
-                color: #F4F4F5;
-                border: 1px solid #56616D;
-                border-radius: 6px;
-                padding: 6px;
-                selection-background-color: #FF4D00;
-            }
-            QTextBrowser#chatBrowser {
-                background: #414B56;
-                border: 0;
-                border-radius: 0;
-                padding: 0;
-                selection-background-color: #FF4D00;
-            }
-            QPlainTextEdit#promptEdit {
-                padding: 9px 10px;
-            }
-            QComboBox#toolApprovalCombo {
-                color: #F4F4F5;
-                background: #252C33;
-                border: 1px solid #56616D;
-                border-radius: 6px;
-                padding: 4px 8px;
-                min-width: 132px;
-            }
-            QComboBox#toolApprovalCombo:hover {
-                background: #333C46;
-            }
-            QComboBox#toolApprovalCombo::drop-down {
-                border: 0;
-                width: 20px;
-            }
-            QComboBox QAbstractItemView {
-                background: #252C33;
-                color: #F4F4F5;
-                border: 1px solid #56616D;
-                selection-background-color: #FF4D00;
-            }
-            QListWidget::item {
-                padding: 8px;
-                border-radius: 5px;
-            }
-            QListWidget::item:selected {
-                background: #333C46;
-                color: #FFFFFF;
-                border: 1px solid #56616D;
-            }
-            QFrame#inputFrame {
-                background: #252C33;
-                border: 1px solid #56616D;
-                border-radius: 8px;
-            }
-            QFrame#bottomAlert {
-                background: #FFFFFF;
-                border: 1px solid #FFFFFF;
-                border-radius: 8px;
-            }
-            QLabel#bottomAlertLabel {
-                background: #FFFFFF;
-                color: #111827;
-                font-size: 13px;
-                font-weight: 600;
-            }
-            QPushButton#bottomAlertClose {
-                background: #FFFFFF;
-                border: 1px solid #D1D5DB;
-                border-radius: 13px;
-                color: #111827;
-                font-weight: 700;
-                padding: 0;
-            }
-            QPushButton#bottomAlertClose:hover {
-                background: #F3F4F6;
-            }
-            QPushButton {
-                color: #F4F4F5;
-                background: #333C46;
-                border: 1px solid #56616D;
-                border-radius: 6px;
-                padding: 8px;
-                font-weight: 600;
-            }
-            QPushButton:hover {
-                background: #414B56;
-            }
-            QPushButton:disabled {
-                color: #89939E;
-                background: #252C33;
-            }
-            QPushButton#primaryButton {
-                color: #FFFFFF;
-                background: #FF4D00;
-                border-color: #FF4D00;
-            }
-            QPushButton#primaryButton:hover {
-                background: #E64500;
-            }
-            QPushButton#secondaryButton {
-                color: #F4F4F5;
-                background: #252C33;
-                border-color: #56616D;
-            }
-            QPushButton#secondaryButton:hover {
-                background: #414B56;
-            }
-            QPushButton#stopButton {
-                color: #FFFFFF;
-                background: #B91C1C;
-                border-color: #B91C1C;
-            }
-            QPushButton#stopButton:hover {
-                background: #991B1B;
-            }
-            """
-        )
+        self.setStyleSheet(MAIN_WINDOW_STYLE)
