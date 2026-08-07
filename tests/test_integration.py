@@ -417,6 +417,33 @@ More text'''
             assert "Message 9" in agent.conversation_history[-1]["content"]
 
     @pytest.mark.asyncio
+    async def test_conversation_history_is_summarized_before_trim(self):
+        """Summarization receives the complete history before older turns are removed."""
+        with patch('config.get_llm_config') as mock_config:
+            mock_config.return_value = {
+                "api_key": "test-key",
+                "backend": "openai",
+                "model": "gpt-4",
+                "base_url": "https://api.openai.com/v1",
+            }
+
+            agent = AsyncAIAgent()
+            agent.max_history_messages = 5
+            original_messages = [
+                {"role": "user", "content": f"Message {index}"}
+                for index in range(7)
+            ]
+            agent.conversation_history = list(original_messages)
+            agent.summarize_conversation = AsyncMock(return_value="Summary of messages 0 through 6")
+
+            await agent._compact_history_if_needed()
+
+            agent.summarize_conversation.assert_awaited_once_with(original_messages)
+            assert agent._conversation_summary == "Summary of messages 0 through 6"
+            assert agent.conversation_history == original_messages[-4:]
+            assert len(agent.conversation_history) == 4
+
+    @pytest.mark.asyncio
     async def test_event_callback(self):
         """Test event callback is properly invoked."""
         with patch('config.get_llm_config') as mock_config:

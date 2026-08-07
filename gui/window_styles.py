@@ -23,6 +23,12 @@ QLabel#panelHeading {
     font-weight: 700;
     color: #F4F4F5;
 }
+QLabel#welcomeTitle {
+    color: #FFFFFF;
+    font-size: 32px;
+    font-weight: 700;
+    padding: 0 12px 16px;
+}
 QLabel#inputModelLabel {
     color: #B8C0C8;
     font-size: 12px;
@@ -38,7 +44,8 @@ QComboBox {
     padding: 6px;
     selection-background-color: #FF4D00;
 }
-QTextBrowser#chatBrowser {
+QTextBrowser#chatBrowser,
+QWebEngineView#chatBrowser {
     background: #414B56;
     border: 0;
     border-radius: 0;

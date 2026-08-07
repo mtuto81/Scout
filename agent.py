@@ -11,7 +11,11 @@ from typing import Callable, Dict, List, Any, Optional
 
 
 class AsyncAIAgent:
-    def __init__(self, event_callback: Optional[Callable[[str], None]] = None):
+    def __init__(
+        self,
+        event_callback: Optional[Callable[[str], None]] = None,
+        stream_callback: Optional[Callable[[str], None]] = None,
+    ):
         llm_config = get_llm_config()
         if not llm_config["api_key"]:
             raise RuntimeError(f"API key is not set for backend '{llm_config['backend']}'.")
@@ -23,11 +27,14 @@ class AsyncAIAgent:
         self.tool_manager = AsyncToolManager()
         self.logger = Logger()
         self.event_callback = event_callback
+        self.stream_callback = stream_callback
         self.conversation_history: List[Dict[str, Any]] = []
         self.max_iterations = 40
         self.max_history_messages = 20
         self.max_parse_repairs = 1
         self._tool_recovery_context: str = ""
+        self._emitted_tool_load_errors: set[str] = set()
+        self._conversation_summary: str = ""
 
     async def get_ai_response(self, prompt: str) -> str:
         self._add_message("user", prompt)
@@ -38,6 +45,7 @@ class AsyncAIAgent:
 
         tool_results = []
         for iteration in range(self.max_iterations):
+            await self._compact_history_if_needed()
             self._emit_event(f"Agent thinking...")
             ai_response = await self._get_ai_decision()
         
@@ -65,8 +73,108 @@ class AsyncAIAgent:
         self._tool_recovery_context = ""
         return fallback_response
 
+    async def _compact_history_if_needed(self) -> None:
+        """Summarize old turns before the model context becomes unnecessarily large."""
+        limit = self.max_history_messages
+        if limit <= 0 or len(self.conversation_history) <= limit:
+            return
+
+        full_history = list(self.conversation_history)
+        keep_count = max(4, limit // 2)
+        recent_messages = full_history[-keep_count:]
+        self._emit_event("Conversation context is large. Summarizing older messages...")
+
+        try:
+            summary = await self.summarize_conversation(full_history)
+        except Exception as exc:
+            self._emit_event(f"Conversation summary failed; trimming older messages: {exc}")
+            self.conversation_history = recent_messages
+            return
+
+        self._conversation_summary = summary
+        self.conversation_history = recent_messages
+        self._emit_event("Older conversation messages summarized.")
+
+    async def summarize_conversation(self, messages: List[Dict[str, Any]]) -> str:
+        """Return a concise summary without changing the agent's chat history."""
+        conversation = self._format_conversation_for_prompt(messages)
+        if not conversation:
+            return "No conversation to summarize."
+
+        prompt = (
+            "Summarize the following Scout conversation for future reference. "
+            "Represent the important request, actions taken, tool results, failures, "
+            "and unresolved tasks. Be concise and factual. Do not invent details. "
+            "Return only the summary, with no preamble.\n\n"
+            f"{conversation}"
+        )
+        return await self._request_text(prompt)
+
+    async def generate_conversation_title(self, messages: List[Dict[str, Any]]) -> str:
+        """Generate a short title without changing the agent's chat history."""
+        conversation = self._format_conversation_for_prompt(messages)
+        if not conversation:
+            return "New chat"
+
+        prompt = (
+            "Create a short descriptive title for the following conversation. "
+            "Use 3 to 8 words, do not use quotation marks, and return only the title. "
+            "Focus on the user's main goal.\n\n"
+            f"{conversation}"
+        )
+        title = await self._request_text(prompt)
+        title = " ".join(title.split()).strip(" \t\r\n\"'")
+        return title[:80] or "New chat"
+
+    def _format_conversation_for_prompt(self, messages: List[Dict[str, Any]]) -> str:
+        """Format every valid message so every conversation turn is represented."""
+        lines = []
+        for index, message in enumerate(messages or [], start=1):
+            if not isinstance(message, dict):
+                continue
+            role = str(message.get("role", "unknown")).strip().lower() or "unknown"
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                continue
+            lines.append(f"Message {index} ({role}):\n{content.strip()}")
+        return "\n\n".join(lines)
+
+    async def _request_text(self, prompt: str) -> str:
+        """Make a one-shot metadata request without mutating conversation history."""
+        try:
+            response = await self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": "You are a careful conversation metadata assistant."},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.1,
+            )
+        except openai.AuthenticationError:
+            raise RuntimeError(
+                f"Authentication failed for backend '{self.backend}'. Check your API key in Settings."
+            )
+        except openai.RateLimitError:
+            raise RuntimeError(
+                f"Rate limit exceeded for backend '{self.backend}'. Wait a moment and try again."
+            )
+        except openai.APITimeoutError:
+            raise RuntimeError(
+                f"Request timed out for backend '{self.backend}'. Check your network connection."
+            )
+        except openai.APIConnectionError:
+            raise RuntimeError(
+                f"Cannot connect to backend '{self.backend}'. Check your network connection and backend URL in Settings."
+            )
+        except openai.APIError as exc:
+            raise RuntimeError(f"Backend '{self.backend}' returned an error: {exc}")
+
+        content = response.choices[0].message.content
+        return content.strip() if isinstance(content, str) else ""
+
     async def _get_ai_decision(self) -> str:
         tool_schemas = json.dumps(self.tool_manager.describe_tools(), ensure_ascii=False, indent=2)
+        self._emit_tool_load_errors()
 
         system_prompt = f"""
 You are Scout, a highly capable IT AI assistant with access to tools. You solve user requests by reasoning step-by-step and calling tools when needed.
@@ -97,6 +205,11 @@ The assistant is running on a {platform.system()} machine.
 """
 
         messages = [{"role": "system", "content": system_prompt}]
+        if self._conversation_summary:
+            messages.append({
+                "role": "system",
+                "content": "Summary of earlier conversation messages:\n" + self._conversation_summary,
+            })
         if self._tool_recovery_context:
             messages.append({"role": "system", "content": self._tool_recovery_context})
         messages.extend(self.conversation_history)
@@ -106,7 +219,9 @@ The assistant is running on a {platform.system()} machine.
                 model=self.model,
                 messages=messages,
                 temperature=0.1,
+                stream=True,
             )
+            return await self._collect_streamed_response(response)
         except openai.AuthenticationError:
             raise RuntimeError(
                 f"Authentication failed for backend '{self.backend}'. Check your API key in Settings."
@@ -134,6 +249,43 @@ The assistant is running on a {platform.system()} machine.
             )
 
         return response.choices[0].message.content
+
+    async def _collect_streamed_response(self, stream) -> str:
+        final_parts = []
+        visible_parts = []
+
+        async for chunk in stream:
+            if not chunk.choices:
+                continue
+
+            delta = chunk.choices[0].delta
+            reasoning = (
+                getattr(delta, "reasoning_content", None)
+                or getattr(delta, "reasoning", None)
+            )
+            content = getattr(delta, "content", None)
+
+            if reasoning:
+                visible_parts.append(reasoning)
+            if content:
+                final_parts.append(content)
+                visible_parts.append(content)
+
+            if reasoning or content:
+                self._emit_stream("".join(visible_parts))
+
+        return "".join(final_parts or visible_parts).strip()
+
+    def _emit_stream(self, content: str) -> None:
+        if self.stream_callback:
+            self.stream_callback(content)
+
+    def _emit_tool_load_errors(self) -> None:
+        for error in self.tool_manager.get_load_errors():
+            if error in self._emitted_tool_load_errors:
+                continue
+            self._emitted_tool_load_errors.add(error)
+            self._emit_event(f"Tool loading warning: {error}")
 
 
     async def _repair_tool_json(self, raw_response: str, error: str) -> str: 

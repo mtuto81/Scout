@@ -3,6 +3,7 @@ llama-cpp-python
 PySide6
 psutil
 requests
+beautifulsoup4
 markdown
 pypdf
 certifi

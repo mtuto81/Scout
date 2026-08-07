@@ -3,7 +3,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 
-WORKSPACE_ROOT = Path("/", os.getcwd()).resolve()
+WORKSPACE_ROOT = Path("~", os.getcwd()).resolve()
 
 _confirm_callback: Optional[Callable[[str], bool]] = None
 

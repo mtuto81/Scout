@@ -1,6 +1,6 @@
 # Scout
 
-Scout is a native Linux IT assistant built with PySide6. It can use an online OpenRouter-compatible backend, a local Ollama backend, or a direct local llama.cpp backend.
+Scout is a native Linux IT assistant built with PySide6. It can use an online OpenRouter-compatible backend or a direct local llama.cpp backend(beta).
 
 ## Run From Source
 
@@ -51,12 +51,7 @@ export SCOUT_BACKEND=openrouter
 export OPENROUTER_API_KEY=your_key_here
 ```
 
-For Ollama:
 
-```bash
-export SCOUT_BACKEND=ollama
-export OLLAMA_MODEL=gemma4:latest
-```
 
 For direct local llama.cpp:
 

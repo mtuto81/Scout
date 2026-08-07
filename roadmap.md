@@ -6,12 +6,11 @@
 
 ## 0.0.8
 - Add delete conversation
-- Add rename conversation
 - Add search conversations
 - Add "clear current conversation memory"
 
 ## 0.0.9
-- Add automatic history summarization for long chats
+- Add automatic context compaction for long chats
 - Add command validator step: model proposes command, Scout validates, then user approves
 - Add tool-output prompt-injection protection
 

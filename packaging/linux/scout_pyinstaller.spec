@@ -13,6 +13,7 @@ hiddenimports += collect_submodules("gui")
 hiddenimports += [
     "gui.updater",
     "certifi",
+    "bs4",
     "markdown",
     "psutil",
     "qtawesome",

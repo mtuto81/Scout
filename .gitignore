@@ -50,3 +50,9 @@ agent().py
 .DS_Store
 Thumbs.db
 bugs.md
+*.rpm
+
+LINUX.md
+roadmap.md
+tuto.md
+fprintd-1.94.5-5.fc44.x86_64.rpm

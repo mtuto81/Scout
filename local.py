@@ -280,6 +280,80 @@ class LocalLlamaService:
         }
 
 
+    def chat_completion_stream(self, payload: dict[str, Any]):
+        if self._llm is None:
+            raise RuntimeError("Local model is not loaded.")
+
+        messages = payload.get("messages")
+        if not isinstance(messages, list):
+            raise ValueError("Field 'messages' must be a list.")
+
+        heuristic_payload = _heuristic_tool_call_payload(messages)
+        if heuristic_payload is not None:
+            content = json.dumps(heuristic_payload, ensure_ascii=False)
+            chunk_id = f"chatcmpl-{int(time.time())}"
+            created = int(time.time())
+            yield {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": self.model_name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {"role": "assistant", "content": content},
+                        "finish_reason": None,
+                    }
+                ],
+            }
+            yield {
+                "id": chunk_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": self.model_name,
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"}
+                ],
+            }
+            return
+
+        request_max_tokens_value = payload.get("max_tokens")
+        temperature_value = payload.get("temperature")
+        request_max_tokens = int(self.max_tokens if request_max_tokens_value is None else request_max_tokens_value)
+        temperature = float(0.1 if temperature_value is None else temperature_value)
+        completion_kwargs = {
+            "messages": messages,
+            "max_tokens": request_max_tokens,
+            "temperature": temperature,
+            "top_p": payload.get("top_p"),
+            "stop": payload.get("stop"),
+            "stream": True,
+        }
+        completion_kwargs = {key: value for key, value in completion_kwargs.items() if value is not None}
+
+        with self._lock:
+            stream = self._llm.create_chat_completion(**completion_kwargs)
+
+        for chunk in stream:
+            choice = (chunk.get("choices") or [{}])[0]
+            delta = choice.get("delta") or {}
+            if not delta:
+                continue
+            yield {
+                "id": chunk.get("id") or f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion.chunk",
+                "created": chunk.get("created") or int(time.time()),
+                "model": self.model_name,
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {k: v for k, v in delta.items() if v is not None},
+                        "finish_reason": choice.get("finish_reason"),
+                    }
+                ],
+            }
+
+
 class LocalHTTPServer(ThreadingHTTPServer):
     daemon_threads = True
     allow_reuse_address = True
@@ -291,6 +365,7 @@ class LocalHTTPServer(ThreadingHTTPServer):
 
 class LocalRequestHandler(BaseHTTPRequestHandler):
     server_version = "ScoutLocalLLM/1.0"
+    protocol_version = "HTTP/1.1"
 
     def _write_json(self, status: int, payload: dict[str, Any]) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -299,6 +374,26 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def _write_sse_start(self) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.end_headers()
+
+    def _write_sse_line(self, line: str) -> None:
+        payload = line.encode("utf-8")
+        chunk_header = f"{len(payload):x}\r\n".encode("ascii")
+        self.wfile.write(chunk_header)
+        self.wfile.write(payload)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
+
+    def _write_sse_end(self) -> None:
+        self.wfile.write(b"0\r\n\r\n")
+        self.wfile.flush()
 
     def _send_error(self, status: int, message: str) -> None:
         self._write_json(status, {"error": {"message": message, "type": "scout_local_error"}})
@@ -343,13 +438,38 @@ class LocalRequestHandler(BaseHTTPRequestHandler):
             return
 
         service: LocalLlamaService = self.server.service  # type: ignore[attr-defined]
-        try:
-            response = service.chat_completion(payload)
-        except Exception as exc:
-            self._send_error(500, str(exc))
-            return
+        is_streaming = bool(payload.get("stream"))
 
-        self._write_json(200, response)
+        try:
+            start = time.perf_counter()
+
+            if is_streaming:
+                self._write_sse_start()
+                for chunk in service.chat_completion_stream(payload):
+                    self._write_sse_line(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n")
+                self._write_sse_line("data: [DONE]\n\n")
+                self._write_sse_end()
+                elapsed = time.perf_counter() - start
+                print(f"Streaming generation: {elapsed:.2f}s")
+            else:
+                response = service.chat_completion(payload)
+                elapsed = time.perf_counter() - start
+                print(f"Generation: {elapsed:.2f}s")
+                print((response["choices"][0]["message"]["content"] or "").strip())
+                self._write_json(200, response)
+
+        except Exception as exc:
+            if is_streaming:
+                try:
+                    self._write_sse_start()
+                    self._write_sse_line(f"data: {json.dumps({'error': str(exc)}, ensure_ascii=False)}\n\n")
+                    self._write_sse_line("data: [DONE]\n\n")
+                    self._write_sse_end()
+                except Exception:
+                    pass
+            else:
+                self._send_error(500, str(exc))
+            return
 
     def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
         if os.environ.get("SCOUT_LOCAL_VERBOSE") == "1":
@@ -463,7 +583,7 @@ def main() -> None:
         serve(args.host, args.port, model_path, args.ctx, args.threads, args.gpu_layers, args.max_tokens)
         return
 
-    smoke_test(model_path, "hi,how are you", args.ctx, args.max_tokens, args.threads, args.gpu_layers)
+    smoke_test(model_path, "who are you ?", args.ctx, args.max_tokens, args.threads, args.gpu_layers)
 
 
 if __name__ == "__main__":

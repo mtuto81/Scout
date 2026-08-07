@@ -42,6 +42,7 @@ class AsyncToolManager:
         self.tools_directory = tools_directory
         self.tools: Dict[str, ToolSpec] = {}
         self.aliases: Dict[str, str] = {}
+        self.load_errors: List[str] = []
         self._loaded = False
         self._executor = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ScoutTool")
 
@@ -74,6 +75,7 @@ class AsyncToolManager:
 
         tools_path = self._tools_path()
         if not os.path.isdir(tools_path):
+            self.load_errors.append(f"Tool directory not found: {tools_path}")
             self._loaded = True
             return
 
@@ -96,7 +98,7 @@ class AsyncToolManager:
                     sys.modules[module_key] = module
                     spec.loader.exec_module(module)
             except Exception as exc:
-                print(f"[tool-manager] skipped {filename}: {exc}")
+                self._record_load_error(f"Skipped {filename}: {exc}")
                 continue
 
             for tool_def in getattr(module, "TOOLS", []):
@@ -104,9 +106,16 @@ class AsyncToolManager:
                     self.register(tool_def)
                 except Exception as exc:
                     name = tool_def.get("name", "unknown") if isinstance(tool_def, dict) else "unknown"
-                    print(f"[tool-manager] skipped tool '{name}' in {filename}: {exc}")
+                    self._record_load_error(f"Skipped tool '{name}' in {filename}: {exc}")
 
         self._loaded = True
+
+    def _record_load_error(self, message: str) -> None:
+        self.load_errors.append(message)
+
+    def get_load_errors(self) -> List[str]:
+        self._discover_tools()
+        return list(self.load_errors)
 
     def register(self, tool_def: Mapping[str, Any]) -> None:
         name = str(tool_def["name"]).strip()

@@ -16,6 +16,7 @@ class AgentWorker(QObject):
     result_ready = Signal(str, int)
     error = Signal(str, int)
     flow_event = Signal(str, int)
+    stream_update = Signal(str, int)
     busy_state_changed = Signal(bool)
     stopped = Signal(int)
     command_confirmation_requested = Signal(str)
@@ -50,7 +51,10 @@ class AgentWorker(QObject):
             self._prepare_backend_runtime()
             self._install_command_confirm_callback()
             self._install_file_confirm_callback()
-            self.agent = AsyncAIAgent(event_callback=self._emit_flow_event)
+            self.agent = AsyncAIAgent(
+                event_callback=self._emit_flow_event,
+                stream_callback=self._emit_stream_update,
+            )
             self._apply_conversation_context()
             self._idle_timer.start()
         except Exception as exc:
@@ -70,7 +74,10 @@ class AgentWorker(QObject):
             self._prepare_backend_runtime()
             self._install_command_confirm_callback()
             self._install_file_confirm_callback()
-            self.agent = AsyncAIAgent(event_callback=self._emit_flow_event)
+            self.agent = AsyncAIAgent(
+                event_callback=self._emit_flow_event,
+                stream_callback=self._emit_stream_update,
+            )
             self._apply_conversation_context()
             self.flow_event.emit("Agent settings reloaded.", -1)
         except Exception as exc:
@@ -217,6 +224,11 @@ class AgentWorker(QObject):
             conversation_id = self._active_conversation_id or -1
         self.flow_event.emit(message, conversation_id)
 
+    def _emit_stream_update(self, content: str) -> None:
+        with self._lock:
+            conversation_id = self._active_conversation_id or -1
+        self.stream_update.emit(content, conversation_id)
+
     def _install_command_confirm_callback(self) -> None:
         try:
             from tools.cmd import set_confirm_callback
@@ -272,7 +284,7 @@ class AgentWorker(QObject):
         os.environ["SCOUT_LOCAL_BASE_URL"] = self._local_base_url
 
         try:
-            self._wait_for_local_backend(self._local_base_url, timeout_seconds=180)
+            self._wait_for_local_backend(self._local_base_url, timeout_seconds=800)
         except Exception:
             self._stop_local_backend()
             raise

@@ -1,5 +1,7 @@
+import json
+
 from PySide6.QtCore import QSize, Qt, Signal, Slot
-from PySide6.QtGui import QFont, QTextBlockFormat, QTextCursor
+from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -13,16 +15,21 @@ from PySide6.QtWidgets import (
     QPushButton,
     QSizePolicy,
     QStyle,
-    QTextBrowser,
     QVBoxLayout,
     QWidget,
 )
+from PySide6.QtWebEngineWidgets import QWebEngineView
 
 from config import get_runtime_settings
 from gui.conversation_store import ConversationStore
 from gui.dialogs.settings_dialog import SettingsDialog
 from gui.dialogs.confirm_dialog import CommandConfirmDialog
-from gui.transcript import CHAT_CSS, message_html, system_note_html
+from gui.transcript import (
+    message_html,
+    system_note_html,
+    transient_message_html,
+    transcript_document_html,
+)
 from gui.window_styles import MAIN_WINDOW_STYLE
 from gui.widgets.conversation_row import ConversationRowWidget
 from gui.widgets.prompt_edit import PromptEdit
@@ -59,6 +66,10 @@ class MainWindow(QMainWindow):
         self._current_conversation_id = None
         self._loading_conversation = False
         self._active_request_conversation_id = None
+        self._chat_page_ready = False
+        self._pending_chat_scripts = []
+        self._active_stream_conversation_id = None
+        self._stream_element_id = "active-agent-stream"
 
         self._build_ui()
         self._apply_button_icons()
@@ -68,6 +79,7 @@ class MainWindow(QMainWindow):
         self._busy = False
         self._stop_message_shown = False
         self._load_conversations()
+        self._start_welcome_session()
 
     def _build_ui(self) -> None:
         root = QWidget()
@@ -111,6 +123,15 @@ class MainWindow(QMainWindow):
 
         alert_layout.addWidget(self.bottom_alert_label, 1)
         alert_layout.addWidget(self.bottom_alert_close, 0, Qt.AlignTop)
+
+    def _start_welcome_session(self) -> None:
+        """Start launch in a fresh, unsaved conversation view."""
+        self._current_conversation_id = None
+        self._active_request_conversation_id = None
+        self.conversation_list.clearSelection()
+        self._update_conversation_row_selection(None)
+        self._clear_chat()
+        self._set_welcome_state(True)
 
     def _build_sidebar(self) -> QWidget:
         panel = QFrame()
@@ -168,12 +189,21 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(10)
 
-        self.chat_browser = QTextBrowser()
+        self.chat_browser = QWebEngineView()
         self.chat_browser.setObjectName("chatBrowser")
-        self.chat_browser.setOpenExternalLinks(True)
         self.chat_browser.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.chat_browser.setStyleSheet("background: #414B56; border: 0;")
-        self.chat_browser.viewport().setStyleSheet("background: #414B56;")
+        self.chat_browser.setContextMenuPolicy(Qt.NoContextMenu)
+        self.chat_browser.loadFinished.connect(self._chat_page_loaded)
+        self._reset_chat_page()
+
+        self._welcome_top_spacer = QWidget()
+        self._welcome_top_spacer.setVisible(False)
+        self._welcome_top_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        self.welcome_label = QLabel("Welcome, how can I help?")
+        self.welcome_label.setObjectName("welcomeTitle")
+        self.welcome_label.setAlignment(Qt.AlignCenter)
+        self.welcome_label.setVisible(False)
 
         input_frame = QFrame()
         input_frame.setObjectName("inputFrame")
@@ -219,8 +249,18 @@ class MainWindow(QMainWindow):
         input_layout.addLayout(input_text_layout, 1)
         input_layout.addWidget(self.send_button, 0, Qt.AlignTop)
 
+        self._welcome_bottom_spacer = QWidget()
+        self._welcome_bottom_spacer.setVisible(False)
+        self._welcome_bottom_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
         layout.addWidget(self.chat_browser, 1)
-        layout.addWidget(input_frame)
+        layout.addWidget(self._welcome_top_spacer, 0)
+        layout.addWidget(self.welcome_label, 0)
+        layout.addWidget(input_frame, 0)
+        layout.addWidget(self._welcome_bottom_spacer, 0)
+        self._input_frame = input_frame
+        self._chat_layout = layout
+        self._set_welcome_state(True)
         return panel
 
     def _connect_signals(self) -> None:
@@ -250,6 +290,7 @@ class MainWindow(QMainWindow):
         conversation_id = self._current_conversation_id
         self._emit_conversation_context(conversation_id)
         self._active_request_conversation_id = conversation_id
+        self._set_welcome_state(False)
         self.prompt_edit.clear()
         self.append_message("user", prompt)
         self._store.add_message(conversation_id, "user", prompt)
@@ -273,7 +314,7 @@ class MainWindow(QMainWindow):
         conversation_id = self._store.create_conversation()
         self._load_conversations(select_conversation_id=conversation_id)
         if select:
-            self.chat_browser.clear()
+            self._clear_chat()
             self.append_system_note("New conversation started.")
         return conversation_id
 
@@ -318,8 +359,13 @@ class MainWindow(QMainWindow):
 
         self._current_conversation_id = conversation_id
         self._update_conversation_row_selection(conversation_id)
-        self.chat_browser.clear()
-        for message in self._store.get_messages(conversation_id):
+        self._clear_chat()
+        conversation_messages = self._store.get_messages(conversation_id)
+        self._set_welcome_state(not any(
+            message["role"] in ("user", "assistant") and message["content"].strip()
+            for message in conversation_messages
+        ))
+        for message in conversation_messages:
             if message["role"] in ("user", "assistant"):
                 self.append_message(message["role"], message["content"], persist=False)
         self._emit_conversation_context(conversation_id)
@@ -347,7 +393,7 @@ class MainWindow(QMainWindow):
 
         if self._current_conversation_id == conversation_id:
             self._current_conversation_id = None
-            self.chat_browser.clear()
+            self._clear_chat()
 
         self._load_conversations()
 
@@ -377,18 +423,24 @@ class MainWindow(QMainWindow):
                 widget.set_selected(item.data(Qt.UserRole) == selected_id)
 
     def append_message(self, role: str, content: str, persist: bool = False) -> None:
-        alignment = Qt.AlignRight if role == "user" else Qt.AlignHCenter
-        self._append_chat_html(message_html(role, content), alignment)
+        self._append_chat_html(message_html(role, content))
         if persist and self._current_conversation_id is not None:
             self._store.add_message(self._current_conversation_id, role, content)
 
     def append_system_note(self, content: str) -> None:
-        self._append_chat_html(system_note_html(content), Qt.AlignHCenter)
+        self._append_chat_html(system_note_html(content))
 
     def append_flow_event(self, content: str, conversation_id: int = -1) -> None:
         if conversation_id != -1 and conversation_id != self._current_conversation_id:
             return
         self.append_system_note(content)
+
+    def show_stream_update(self, content: str, conversation_id: int) -> None:
+        if conversation_id != self._current_conversation_id:
+            return
+        self._active_stream_conversation_id = conversation_id
+        html = transient_message_html(self._stream_element_id, content)
+        self._upsert_chat_html(self._stream_element_id, html)
 
     def _open_settings_dialog(self) -> None:
         dialog = SettingsDialog(self)
@@ -481,6 +533,7 @@ class MainWindow(QMainWindow):
         self.file_operation_confirmation_resolved.emit(dialog.exec() == QMessageBox.Yes)
 
     def show_agent_response(self, response: str, conversation_id: int) -> None:
+        self._remove_stream_message(conversation_id)
         self._store.add_message(conversation_id, "assistant", response)
         if conversation_id == self._current_conversation_id:
             self.append_message("assistant", response)
@@ -490,6 +543,7 @@ class MainWindow(QMainWindow):
         self._active_request_conversation_id = None
 
     def show_error(self, message: str, conversation_id: int = -1) -> None:
+        self._remove_stream_message(conversation_id)
         if conversation_id == -1 or conversation_id == self._current_conversation_id:
             self.append_system_note(f"Error: {message}")
         self.set_busy(False)
@@ -505,6 +559,7 @@ class MainWindow(QMainWindow):
                 self._active_request_conversation_id = None
             return
         self._stop_message_shown = True
+        self._remove_stream_message(conversation_id)
         self.append_system_note("Request stopped.")
         self.set_busy(False)
         if conversation_id == self._active_request_conversation_id:
@@ -549,31 +604,67 @@ class MainWindow(QMainWindow):
     def _standard_icon(self, icon: QStyle.StandardPixmap):
         return self.style().standardIcon(icon)
 
-    def _init_chat_document(self) -> None:
-        if self.chat_browser.document().characterCount() > 1:
-            return
-        self.chat_browser.setHtml(
-            f"<!doctype html><html><head><style>{CHAT_CSS}</style></head><body></body></html>"
+    def _clear_chat(self) -> None:
+        self._active_stream_conversation_id = None
+        self._run_chat_script("window.scoutTranscript.clear();")
+
+    def _set_welcome_state(self, welcome: bool) -> None:
+        """Toggle the centered empty-conversation view."""
+        self.chat_browser.setVisible(not welcome)
+        self._welcome_top_spacer.setVisible(welcome)
+        self.welcome_label.setVisible(welcome)
+        self._welcome_bottom_spacer.setVisible(welcome)
+        self._chat_layout.setStretch(0, 0 if welcome else 1)
+        self._chat_layout.setStretch(1, 1 if welcome else 0)
+        self._chat_layout.setStretch(2, 0)
+        self._chat_layout.setStretch(3, 0)
+        self._chat_layout.setStretch(4, 1 if welcome else 0)
+        self._input_frame.setSizePolicy(
+            QSizePolicy.Expanding,
+            QSizePolicy.Preferred,
         )
 
-    def _append_chat_html(self, html: str, alignment: Qt.AlignmentFlag = Qt.AlignLeft) -> None:
-        self._init_chat_document()
-        cursor = self.chat_browser.textCursor()
-        cursor.movePosition(QTextCursor.End)
-        if self.chat_browser.document().characterCount() > 1:
-            cursor.insertBlock()
+    def _append_chat_html(self, html: str) -> None:
+        encoded_html = json.dumps(html)
+        self._run_chat_script(f"window.scoutTranscript.append({encoded_html});")
 
-        block_format = QTextBlockFormat()
-        block_format.setAlignment(alignment)
-        cursor.setBlockFormat(block_format)
-        cursor.insertHtml(html)
+    def _upsert_chat_html(self, element_id: str, html: str) -> None:
+        encoded_id = json.dumps(element_id)
+        encoded_html = json.dumps(html)
+        self._run_chat_script(f"window.scoutTranscript.upsert({encoded_id}, {encoded_html});")
 
-        cursor.insertBlock()
-        reset_format = QTextBlockFormat()
-        reset_format.setAlignment(Qt.AlignLeft)
-        cursor.setBlockFormat(reset_format)
-        scrollbar = self.chat_browser.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
+    def _remove_chat_element(self, element_id: str) -> None:
+        encoded_id = json.dumps(element_id)
+        self._run_chat_script(f"window.scoutTranscript.remove({encoded_id});")
+
+    def _remove_stream_message(self, conversation_id: int | None = None) -> None:
+        if self._active_stream_conversation_id is None:
+            return
+        if conversation_id not in (None, -1, self._active_stream_conversation_id):
+            return
+        self._remove_chat_element(self._stream_element_id)
+        self._active_stream_conversation_id = None
+
+    def _reset_chat_page(self) -> None:
+        self._chat_page_ready = False
+        self._pending_chat_scripts.clear()
+        self.chat_browser.setHtml(transcript_document_html())
+
+    def _chat_page_loaded(self, ok: bool) -> None:
+        self._chat_page_ready = ok
+        if not ok:
+            return
+
+        pending_scripts = list(self._pending_chat_scripts)
+        self._pending_chat_scripts.clear()
+        for script in pending_scripts:
+            self.chat_browser.page().runJavaScript(script)
+
+    def _run_chat_script(self, script: str) -> None:
+        if not self._chat_page_ready:
+            self._pending_chat_scripts.append(script)
+            return
+        self.chat_browser.page().runJavaScript(script)
 
     def _toggle_left_panel(self) -> None:
         self._left_panel_visible = not self._left_panel_visible
