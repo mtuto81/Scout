@@ -34,7 +34,6 @@ QLabel#inputModelLabel {
     font-size: 12px;
     padding-left: 4px;
 }
-QListWidget,
 QPlainTextEdit,
 QComboBox {
     background: #252C33;
@@ -76,37 +75,72 @@ QComboBox QAbstractItemView {
     border: 1px solid #56616D;
     selection-background-color: #FF4D00;
 }
-QListWidget::item {
-    padding: 8px;
-    border-radius: 5px;
-}
-QListWidget::item:selected {
-    background: #333C46;
-    color: #FFFFFF;
-    border: 1px solid #56616D;
-}
-QWidget#conversationRow {
+QWidget#conversationList {
     background: transparent;
     border: 0;
+}
+QScrollArea#conversationScrollArea {
+    background: #1E242A;
+    border: 1px solid #56616D;
+    border-radius: 6px;
+}
+QWidget#conversationListContent {
+    background: #1E242A;
+    padding: 2px;
+}
+QLabel#conversationEmptyState {
+    color: #8F9AA5;
+    font-size: 12px;
+    padding: 28px 18px;
+}
+QWidget#conversationRow {
+    background: #252C33;
+    border: 1px solid #3A444E;
+    border-radius: 9px;
+    min-height: 46px;
+}
+QWidget#conversationRow:hover {
+    background: #2D3741;
+    border-color: #56616D;
+}
+QWidget#conversationRow[hovered="true"] {
+    background: #2D3741;
+    border-color: #7B8794;
 }
 QWidget#conversationRow[selected="true"] {
     background: #333C46;
-    border: 1px solid #56616D;
-    border-radius: 6px;
+    border: 1px solid #FF6A2A;
+}
+QLabel#conversationAccent {
+    background: #56616D;
+    border-radius: 2px;
+}
+QWidget#conversationRow[selected="true"] QLabel#conversationAccent {
+    background: #FF4D00;
 }
 QLabel#conversationTitle {
     color: #F4F4F5;
+    font-size: 13px;
+    font-weight: 650;
 }
-QToolButton#conversationMenuButton {
-    color: #F4F4F5;
+QLabel#conversationMeta {
+    color: #8F9AA5;
+    font-size: 11px;
+}
+QToolButton#conversationDeleteButton {
+    color: #8F9AA5;
     background: transparent;
     border: 0;
-    font-size: 18px;
+    border-radius: 6px;
+    font-size: 17px;
     padding: 0;
 }
-QToolButton#conversationMenuButton:hover {
-    background: #414B56;
-    border-radius: 6px;
+QToolButton#conversationDeleteButton:hover {
+    color: #FFFFFF;
+    background: #B91C1C;
+}
+QWidget#conversationRow[selected="true"] QToolButton#conversationDeleteButton {
+    color: #FFB19A;
 }
 QFrame#inputFrame {
     background: #252C33;

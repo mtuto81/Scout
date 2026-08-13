@@ -8,8 +8,6 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -31,7 +29,7 @@ from gui.transcript import (
     transcript_document_html,
 )
 from gui.window_styles import MAIN_WINDOW_STYLE
-from gui.widgets.conversation_row import ConversationRowWidget
+from gui.widgets.conversation_list import ConversationListWidget
 from gui.widgets.prompt_edit import PromptEdit
 
 try:
@@ -60,7 +58,7 @@ class MainWindow(QMainWindow):
         self.setFont(QFont("Inter", 10))
 
         self._left_panel_visible = True
-        self._sidebar_expanded_width = 260
+        self._sidebar_expanded_width = 340
         self._sidebar_collapsed_width = 54
         self._store = ConversationStore()
         self._current_conversation_id = None
@@ -128,7 +126,7 @@ class MainWindow(QMainWindow):
         """Start launch in a fresh, unsaved conversation view."""
         self._current_conversation_id = None
         self._active_request_conversation_id = None
-        self.conversation_list.clearSelection()
+        self.conversation_list.clear_selection()
         self._update_conversation_row_selection(None)
         self._clear_chat()
         self._set_welcome_state(True)
@@ -155,8 +153,7 @@ class MainWindow(QMainWindow):
         heading_layout.addWidget(self.menu_button)
         heading_layout.addWidget(heading, 1)
 
-        self.conversation_list = QListWidget()
-        self.conversation_list.setObjectName("conversationList")
+        self.conversation_list = ConversationListWidget()
 
         self.new_chat_button = QPushButton("New conversation")
         self.new_chat_button.setObjectName("primaryButton")
@@ -177,7 +174,6 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(heading_layout)
         layout.addWidget(self.conversation_list, 1)
-        layout.addStretch(1)
         layout.addWidget(self.new_chat_button)
         layout.addWidget(self.settings_button)
         return panel
@@ -270,7 +266,8 @@ class MainWindow(QMainWindow):
         self.menu_button.clicked.connect(self._toggle_left_panel)
         self.settings_button.clicked.connect(self._open_settings_dialog)
         self.tool_approval_combo.currentIndexChanged.connect(self._emit_tool_approval_mode)
-        self.conversation_list.currentItemChanged.connect(self._conversation_selected)
+        self.conversation_list.conversation_selected.connect(self._conversation_selected)
+        self.conversation_list.delete_requested.connect(self._delete_conversation)
 
     def _submit_prompt(self) -> None:
         if self._busy:
@@ -308,6 +305,11 @@ class MainWindow(QMainWindow):
             self.append_system_note("Tool execution approval: ask approval.")
 
     def _new_conversation(self) -> None:
+        # The collapsed sidebar keeps the action buttons visible, so use the
+        # new-conversation action as a natural way to reveal the conversation cards.
+        if not self._left_panel_visible:
+            self._left_panel_visible = True
+            self._sync_sidebar_state()
         self._create_conversation(select=True)
 
     def _create_conversation(self, select: bool) -> int:
@@ -324,15 +326,9 @@ class MainWindow(QMainWindow):
 
         conversations = self._store.list_conversations()
         for conversation in conversations:
-            item = QListWidgetItem()
-            item.setData(Qt.UserRole, conversation["id"])
-            item.setSizeHint(QSize(0, 42))
-            self.conversation_list.addItem(item)
-
-            row = ConversationRowWidget(conversation["id"], conversation["title"], self.conversation_list)
-            row.activated.connect(self._select_conversation_by_id)
-            row.delete_requested.connect(self._delete_conversation)
-            self.conversation_list.setItemWidget(item, row)
+            self.conversation_list.add_conversation(
+                conversation["id"], conversation["title"], conversation.get("updated_at")
+            )
 
         self._loading_conversation = False
 
@@ -342,18 +338,12 @@ class MainWindow(QMainWindow):
             return
 
         target_id = select_conversation_id or conversations[0]["id"]
-        self._update_conversation_row_selection(target_id)
-        for row in range(self.conversation_list.count()):
-            item = self.conversation_list.item(row)
-            if item.data(Qt.UserRole) == target_id:
-                self.conversation_list.setCurrentRow(row)
-                return
+        self.conversation_list.set_selected(target_id)
+        self._conversation_selected(target_id)
 
-    def _conversation_selected(self, current, previous) -> None:
-        if self._loading_conversation or current is None:
+    def _conversation_selected(self, conversation_id: int) -> None:
+        if self._loading_conversation:
             return
-
-        conversation_id = current.data(Qt.UserRole)
         if conversation_id == self._current_conversation_id:
             return
 
@@ -371,11 +361,8 @@ class MainWindow(QMainWindow):
         self._emit_conversation_context(conversation_id)
 
     def _select_conversation_by_id(self, conversation_id: int) -> None:
-        for row in range(self.conversation_list.count()):
-            item = self.conversation_list.item(row)
-            if item.data(Qt.UserRole) == conversation_id:
-                self.conversation_list.setCurrentRow(row)
-                return
+        self.conversation_list.set_selected(conversation_id)
+        self._conversation_selected(conversation_id)
 
     def _delete_conversation(self, conversation_id: int) -> None:
         reply = QMessageBox.question(
@@ -398,14 +385,9 @@ class MainWindow(QMainWindow):
         self._load_conversations()
 
     def _update_conversation_title(self, conversation_id: int, title: str) -> None:
-        for row in range(self.conversation_list.count()):
-            item = self.conversation_list.item(row)
-            if item.data(Qt.UserRole) != conversation_id:
-                continue
-            widget = self.conversation_list.itemWidget(item)
-            if widget and hasattr(widget, "set_title"):
-                widget.set_title(title)
-            break
+        widget = self.conversation_list.row_for(conversation_id)
+        if widget:
+            widget.set_title(title)
 
     def _emit_conversation_context(self, conversation_id: int) -> None:
         messages = [
@@ -416,11 +398,7 @@ class MainWindow(QMainWindow):
         self.conversation_context_changed.emit(messages)
 
     def _update_conversation_row_selection(self, selected_id: int | None) -> None:
-        for row in range(self.conversation_list.count()):
-            item = self.conversation_list.item(row)
-            widget = self.conversation_list.itemWidget(item)
-            if widget and hasattr(widget, "set_selected"):
-                widget.set_selected(item.data(Qt.UserRole) == selected_id)
+        self.conversation_list.set_selected(selected_id)
 
     def append_message(self, role: str, content: str, persist: bool = False) -> None:
         self._append_chat_html(message_html(role, content))

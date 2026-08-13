@@ -3,6 +3,8 @@ import os
 from pathlib import Path
 from typing import Dict, List
 
+from tools._paths import safe_home_path
+
 
 SKIP_DIRECTORIES = {
     ".git",
@@ -40,8 +42,8 @@ def search_files(
         raise ValueError("query must not be empty")
 
     try:
-        root = Path(path).expanduser().resolve()
-    except OSError as exc:
+        root = safe_home_path(path)
+    except (OSError, ValueError) as exc:
         return {"ok": False, "error": f"Invalid search path: {exc}", "matches": []}
 
     if not root.exists():
@@ -117,7 +119,7 @@ TOOLS = [
                 },
                 "path": {
                     "type": "string",
-                    "description": "Directory to search. Defaults to the current Scout workspace.",
+                    "description": "Directory inside the user's home directory. Defaults to the home directory.",
                     "default": ".",
                 },
                 "filename_pattern": {

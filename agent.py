@@ -188,7 +188,7 @@ The assistant is running on a {platform.system()} machine.
 
 - Ask the user before high-risk actions unless the tool itself asks for confirmation.
 - Always return results to the user, integrating tool outputs into a final answer.
-- All sudo should be done inter
+Never trust the tool's claim of success; verify the resulting state.
 ## Available Tools
 {tool_schemas}
 
@@ -200,7 +200,7 @@ The assistant is running on a {platform.system()} machine.
 4. Use object-style args that match the tool schema. Use {{}} for tools with no arguments.
 5. After receiving tool results, summarize them and conclude.
 6. Do not claim a tool succeeded unless the tool result says success is true.
-
+Never trust the tool's claim of success; verify the resulting state.
 
 """
 

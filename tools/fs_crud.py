@@ -1,9 +1,7 @@
 import os
-from pathlib import Path
 from typing import Callable, Optional
 
-
-WORKSPACE_ROOT = Path("~", os.getcwd()).resolve()
+from tools._paths import safe_home_path
 
 _confirm_callback: Optional[Callable[[str], bool]] = None
 
@@ -22,10 +20,7 @@ def confirm_operation(description: str) -> bool:
 
 
 def safe_path(path):
-    target = (WORKSPACE_ROOT / path).resolve()
-    if not str(target).startswith(str(WORKSPACE_ROOT)):
-        raise ValueError(f"Path is outside the allowed workspace: {path}")
-    return target
+    return safe_home_path(path)
 
 def create_file(path, content=""):
     """Creates a new file at the specified path."""
@@ -67,12 +62,12 @@ def delete_file(path):
 TOOLS = [
     {
         "name": "create_file",
-        "description": "Create a UTF-8 text file inside the allowed workspace.",
+        "description": "Create a UTF-8 text file inside the user's home directory.",
         "risk": "medium",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path."},
+                "path": {"type": "string", "description": "Relative or absolute path inside the user's home directory."},
                 "content": {"type": "string", "description": "File content.", "default": ""},
             },
             "required": ["path"],
@@ -81,12 +76,12 @@ TOOLS = [
     },
     {
         "name": "read_file",
-        "description": "Read a UTF-8 text file from inside the allowed workspace.",
+        "description": "Read a UTF-8 text file from inside the user's home directory.",
         "risk": "low",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path."},
+                "path": {"type": "string", "description": "Relative or absolute path inside the user's home directory."},
             },
             "required": ["path"],
         },
@@ -94,12 +89,12 @@ TOOLS = [
     },
     {
         "name": "update_file",
-        "description": "Overwrite a UTF-8 text file inside the allowed workspace.",
+        "description": "Overwrite a UTF-8 text file inside the user's home directory.",
         "risk": "medium",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path."},
+                "path": {"type": "string", "description": "Relative or absolute path inside the user's home directory."},
                 "content": {"type": "string", "description": "New file content."},
             },
             "required": ["path", "content"],
@@ -108,12 +103,12 @@ TOOLS = [
     },
     {
         "name": "delete_file",
-        "description": "Delete a file inside the allowed workspace.",
+        "description": "Delete a file inside the user's home directory.",
         "risk": "high",
         "parameters": {
             "type": "object",
             "properties": {
-                "path": {"type": "string", "description": "Workspace-relative file path."},
+                "path": {"type": "string", "description": "Relative or absolute path inside the user's home directory."},
             },
             "required": ["path"],
         },

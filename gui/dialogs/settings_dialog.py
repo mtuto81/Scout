@@ -1,11 +1,13 @@
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
+    QApplication,
     QComboBox,
     QDialog,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -14,6 +16,7 @@ from PySide6.QtWidgets import (
 
 from app_metadata import get_version
 from config import get_settings_path, get_runtime_settings, load_user_settings, save_user_settings
+from uninstall import installed_app_dir, schedule_uninstall
 
 
 class SettingsDialog(QDialog):
@@ -32,11 +35,17 @@ class SettingsDialog(QDialog):
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(12)
 
-        title = QLabel("Backend")
-        title.setObjectName("panelHeading")
-
         version_label = QLabel(f"Scout version {get_version()}")
         version_label.setObjectName("settingsHint")
+
+        license_label = QLabel(
+            '<a href="https://github.com/mtuto81/Scout/blob/main/LICENSE">MIT License</a>'
+            ' · <a href="https://github.com/mtuto81/Scout">GitHub</a>'
+        )
+        license_label.setObjectName("licenseLink")
+        license_label.setTextFormat(Qt.RichText)
+        license_label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        license_label.setOpenExternalLinks(True)
 
         backend_row = QHBoxLayout()
         backend_row.setContentsMargins(0, 0, 0, 0)
@@ -48,7 +57,6 @@ class SettingsDialog(QDialog):
         self.backend_combo = QComboBox()
         self.backend_combo.setObjectName("settingsInput")
         self.backend_combo.addItem("OpenRouter", "openrouter")
-        self.backend_combo.addItem("Ollama", "ollama")
         self.backend_combo.addItem("Local llama.cpp", "local")
         backend_index = self.backend_combo.findData(runtime.get("backend", "openrouter"))
         self.backend_combo.setCurrentIndex(max(0, backend_index))
@@ -161,9 +169,15 @@ class SettingsDialog(QDialog):
         clear_button.setObjectName("secondaryButton")
         clear_button.clicked.connect(self._clear_key)
 
+        uninstall_button = QPushButton("Uninstall Scout")
+        uninstall_button.setObjectName("dangerButton")
+        uninstall_button.setToolTip("Remove the packaged Scout application and desktop launcher")
+        uninstall_button.clicked.connect(self._uninstall)
+
         action_row.addWidget(check_updates_button)
         action_row.addStretch(1)
         action_row.addWidget(clear_button)
+        action_row.addWidget(uninstall_button)
 
         button_row = QHBoxLayout()
         button_row.setContentsMargins(0, 0, 0, 0)
@@ -180,8 +194,8 @@ class SettingsDialog(QDialog):
         button_row.addWidget(cancel_button)
         button_row.addWidget(save_button)
 
-        layout.addWidget(title)
         layout.addWidget(version_label)
+        layout.addWidget(license_label)
         layout.addLayout(backend_row)
         layout.addWidget(self.openrouter_section)
         layout.addWidget(self.ollama_section)
@@ -200,13 +214,12 @@ class SettingsDialog(QDialog):
                 background: #252C33;
                 color: #F4F4F5;
             }
-            QLabel#panelHeading {
-                font-size: 15px;
-                font-weight: 700;
-                color: #FFFFFF;
-            }
             QLabel#settingsHint {
                 color: #B8C0C8;
+                font-size: 12px;
+            }
+            QLabel#licenseLink {
+                color: #FF8A5B;
                 font-size: 12px;
             }
             QLineEdit#settingsInput {
@@ -235,6 +248,11 @@ class SettingsDialog(QDialog):
                 background: #252C33;
                 border-color: #56616D;
             }
+            QPushButton#dangerButton {
+                color: #FFFFFF;
+                background: #9E2A2B;
+                border-color: #C94C4D;
+            }
             """
         )
 
@@ -250,6 +268,31 @@ class SettingsDialog(QDialog):
     def _clear_key(self) -> None:
         self.openrouter_api_input.clear()
         self.ollama_api_input.clear()
+
+    def _uninstall(self) -> None:
+        app_dir = installed_app_dir()
+        if app_dir is None:
+            QMessageBox.information(
+                self,
+                "Uninstall Scout",
+                "Scout is running from source, so there is no packaged application to uninstall.",
+            )
+            return
+
+        answer = QMessageBox.question(
+            self,
+            "Uninstall Scout",
+            "Remove the Scout application and desktop launcher?\n\n"
+            "Your settings and conversations will be kept.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if answer != QMessageBox.Yes:
+            return
+
+        schedule_uninstall(app_dir)
+        self.accept()
+        QApplication.instance().quit()
 
     def _save(self) -> None:
         updates = {

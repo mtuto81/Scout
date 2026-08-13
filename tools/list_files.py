@@ -1,15 +1,9 @@
 import os
-from pathlib import Path
 
-
-WORKSPACE_ROOT = Path("/", os.getcwd()).resolve()
-
+from tools._paths import safe_home_path
 
 def safe_path(path):
-    target = (WORKSPACE_ROOT / path).resolve()
-    if not str(target).startswith(str(WORKSPACE_ROOT)):
-        raise ValueError(f"Path is outside the allowed workspace: {path}")
-    return target
+    return safe_home_path(path)
 
 def list_files(path="."):
     """Lists the files and directories in the specified path."""
