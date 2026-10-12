@@ -1,6 +1,6 @@
 import json
 
-from PySide6.QtCore import QSize, Qt, Signal, Slot
+from PySide6.QtCore import QSize, Qt, QTimer, Signal, Slot
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QComboBox,
@@ -117,10 +117,21 @@ class MainWindow(QMainWindow):
         self.bottom_alert_close.setToolTip("Dismiss")
         self.bottom_alert_close.setAccessibleName("Dismiss alert")
         self.bottom_alert_close.setFixedSize(26, 26)
-        self.bottom_alert_close.clicked.connect(self.bottom_alert.hide)
+        self.bottom_alert_close.clicked.connect(self._dismiss_bottom_alert)
 
         alert_layout.addWidget(self.bottom_alert_label, 1)
         alert_layout.addWidget(self.bottom_alert_close, 0, Qt.AlignTop)
+
+        self.bottom_alert_timer = QTimer(self)
+        self.bottom_alert_timer.setSingleShot(True)
+        self.bottom_alert_timer.setInterval(10000)
+        self.bottom_alert_timer.timeout.connect(self._dismiss_bottom_alert)
+
+    def _dismiss_bottom_alert(self) -> None:
+        if hasattr(self, "bottom_alert_timer"):
+            self.bottom_alert_timer.stop()
+        if hasattr(self, "bottom_alert"):
+            self.bottom_alert.hide()
 
     def _start_welcome_session(self) -> None:
         """Start launch in a fresh, unsaved conversation view."""
@@ -438,11 +449,15 @@ class MainWindow(QMainWindow):
     def show_update_error(self, message: str) -> None:
         self.show_bottom_alert(f"Update error: {message}")
 
-    def show_bottom_alert(self, message: str) -> None:
+    def show_bottom_alert(self, message: str, timeout_ms: int = 10000) -> None:
         self.bottom_alert_label.setText(message)
         self.bottom_alert.setVisible(True)
         self._position_bottom_alert()
         self.bottom_alert.raise_()
+        if hasattr(self, "bottom_alert_timer"):
+            self.bottom_alert_timer.stop()
+            if timeout_ms > 0:
+                self.bottom_alert_timer.start(timeout_ms)
 
     def _position_bottom_alert(self) -> None:
         if not hasattr(self, "bottom_alert"):

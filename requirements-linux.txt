@@ -8,3 +8,4 @@ markdown
 pypdf
 certifi
 qtawesome
+dasbus

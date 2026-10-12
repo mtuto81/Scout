@@ -176,3 +176,5 @@ System Settings -> Keyboard -> Shortcuts -> Add Application
 - The launcher runs the repo copy of Scout.
 - If `.venv/bin/python` exists, the launcher uses it.
 - Otherwise it falls back to `python` from your shell path.
+
+nvidia/nemotron-3.5-lightning:free

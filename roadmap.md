@@ -16,8 +16,8 @@
 
 ## 0.1.0
 - Add dedicated Linux tools instead of relying only on shell:
-  - package manager detector
-  - app install/remove tool
+  - [x] package manager detector
+  - [x] app install/remove tool (with search and installed status check)
   - disk usage tool
   - service status/restart tool
   - desktop environment detector

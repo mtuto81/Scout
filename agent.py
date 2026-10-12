@@ -1,4 +1,5 @@
 import asyncio
+import os
 import platform
 import openai
 from openai import AsyncOpenAI
@@ -8,6 +9,11 @@ from logger import Logger
 import json
 import re
 from typing import Callable, Dict, List, Any, Optional
+
+# Backends that speak an OpenAI-compatible /chat/completions endpoint and are
+# expected to support the native `tools` parameter. Backends outside this set,
+# or ones that reject the parameter at runtime, use the JSON text fallback.
+NATIVE_TOOL_BACKENDS = {"openrouter", "ollama", "local"}
 
 
 class AsyncAIAgent:
@@ -35,6 +41,8 @@ class AsyncAIAgent:
         self._tool_recovery_context: str = ""
         self._emitted_tool_load_errors: set[str] = set()
         self._conversation_summary: str = ""
+        self._native_tools_enabled: bool = os.environ.get("SCOUT_DISABLE_NATIVE_TOOLS", "").strip() not in {"1", "true", "yes"}
+        self._pending_native_tool_calls: List[Dict[str, Any]] = []
 
     async def get_ai_response(self, prompt: str) -> str:
         self._add_message("user", prompt)
@@ -48,10 +56,19 @@ class AsyncAIAgent:
             await self._compact_history_if_needed()
             self._emit_event(f"Agent thinking...")
             ai_response = await self._get_ai_decision()
-        
-            tool_calls = await self._parse_tool_calls(ai_response)
+
+            native_tool_calls = self._consume_pending_native_tool_calls()
+            if native_tool_calls:
+                # Native OpenAI-compatible function calling.
+                self._add_native_assistant_message(ai_response, native_tool_calls)
+                tool_calls = native_tool_calls
+            else:
+                # Fallback: custom JSON tool-call protocol parsed from text.
+                tool_calls = await self._parse_tool_calls(ai_response)
+
             if not tool_calls:
-                self._add_message("assistant", ai_response)
+                if not native_tool_calls:
+                    self._add_message("assistant", ai_response)
                 self._tool_recovery_context = ""
                 try:
                     self.logger.log({"final_response": ai_response})
@@ -59,7 +76,7 @@ class AsyncAIAgent:
                     pass
                 return ai_response
 
-            # Emit the AI's reasoning before the tool call JSON
+            # Emit the AI's reasoning before the tool call
             reasoning = self._extract_reasoning(ai_response)
             if reasoning:
                 self._emit_event(reasoning)
@@ -173,36 +190,8 @@ class AsyncAIAgent:
         return content.strip() if isinstance(content, str) else ""
 
     async def _get_ai_decision(self) -> str:
-        tool_schemas = json.dumps(self.tool_manager.describe_tools(), ensure_ascii=False, indent=2)
-        self._emit_tool_load_errors()
-
-        system_prompt = f"""
-You are Scout, a highly capable IT AI assistant with access to tools. You solve user requests by reasoning step-by-step and calling tools when needed.
-The assistant is running on a {platform.system()} machine.
-
-## Your Capabilities:
-- Think step by step before acting.
-- Explain your reasoning when you decide to call tools.
-- Make a plan if multiple steps or tools are needed, explain it to the  user and execute them iteratively.
-- You may call one or more tools per step.
-
-- Ask the user before high-risk actions unless the tool itself asks for confirmation.
-- Always return results to the user, integrating tool outputs into a final answer.
-Never trust the tool's claim of success; verify the resulting state.
-## Available Tools
-{tool_schemas}
-
-## Response Rules:
-1. If you can answer directly, do so without calling tools.
-2. It you need tools, explain your reasoning and which tools you will call before calling them.
-3. If you need tools, respond ONLY with this JSON object and no markdown:
-{{"tool_calls":[{{"tool":"tool_name","args":{{"arg_name":"value"}}}}]}}
-4. Use object-style args that match the tool schema. Use {{}} for tools with no arguments.
-5. After receiving tool results, summarize them and conclude.
-6. Do not claim a tool succeeded unless the tool result says success is true.
-Never trust the tool's claim of success; verify the resulting state.
-
-"""
+        use_native_tools = self._use_native_tools()
+        system_prompt = self._build_system_prompt(use_native_tools)
 
         messages = [{"role": "system", "content": system_prompt}]
         if self._conversation_summary:
@@ -214,14 +203,27 @@ Never trust the tool's claim of success; verify the resulting state.
             messages.append({"role": "system", "content": self._tool_recovery_context})
         messages.extend(self.conversation_history)
 
+        request_kwargs: Dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.1,
+            "stream": True,
+        }
+        native_requested = False
+        if use_native_tools and self.tool_manager.get_tool_names():
+            request_kwargs["tools"] = self._native_tool_schemas()
+            native_requested = True
+
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.1,
-                stream=True,
+            stream = await self.client.chat.completions.create(**request_kwargs)
+            content, raw_native_tool_calls = await self._collect_streamed_response(stream)
+        except openai.BadRequestError as e:
+            if native_requested and self._looks_like_unsupported_tools_error(e):
+                self._disable_native_tools(str(e))
+                return await self._get_ai_decision()
+            raise RuntimeError(
+                f"Backend '{self.backend}' returned an error: {e}"
             )
-            return await self._collect_streamed_response(response)
         except openai.AuthenticationError:
             raise RuntimeError(
                 f"Authentication failed for backend '{self.backend}'. Check your API key in Settings."
@@ -248,22 +250,181 @@ Never trust the tool's claim of success; verify the resulting state.
                 f"Backend '{self.backend}' returned an error: {e}"
             )
 
-        return response.choices[0].message.content
+        # Native tool-call IDs must be preserved so tool result messages can be
+        # attached back via `tool_call_id` on the next turn.
+        self._pending_native_tool_calls = self._normalize_native_tool_calls(raw_native_tool_calls)
+        return content
 
-    async def _collect_streamed_response(self, stream) -> str:
+    def _use_native_tools(self) -> bool:
+        if not self._native_tools_enabled:
+            return False
+        if os.environ.get("SCOUT_DISABLE_NATIVE_TOOLS", "").strip() in {"1", "true", "yes"}:
+            return False
+        return self.backend in NATIVE_TOOL_BACKENDS
+
+    def _native_tool_schemas(self) -> List[Dict[str, Any]]:
+        """Convert ToolManager definitions into OpenAI function-calling schemas."""
+        schemas = []
+        for tool in self.tool_manager.describe_tools():
+            parameters = tool.get("parameters") or {"type": "object", "properties": {}}
+            schemas.append({
+                "type": "function",
+                "function": {
+                    "name": tool["name"],
+                    "description": tool.get("description", ""),
+                    "parameters": parameters,
+                },
+            })
+        return schemas
+
+    def _disable_native_tools(self, reason: str) -> None:
+        self._native_tools_enabled = False
+        self._emit_event(
+            "Native tool calling is not supported by this backend; using the JSON fallback parser."
+            + (f" ({reason})" if reason else "")
+        )
+
+    @staticmethod
+    def _looks_like_unsupported_tools_error(error: Exception) -> bool:
+        message = str(error).lower()
+        markers = ("tool", "function")
+        return any(marker in message for marker in markers)
+
+    def _consume_pending_native_tool_calls(self) -> List[Dict[str, Any]]:
+        pending = self._pending_native_tool_calls
+        self._pending_native_tool_calls = []
+        return pending
+
+    def _normalize_native_tool_calls(self, raw_tool_calls: List[Any]) -> List[Dict[str, Any]]:
+        if not raw_tool_calls:
+            return []
+
+        normalized = []
+        errors = []
+        for index, raw_call in enumerate(raw_tool_calls, start=1):
+            name = str(raw_call.get("name") or "").strip() if isinstance(raw_call, dict) else ""
+            if not name:
+                errors.append(f"native tool call {index} has no function name")
+                continue
+
+            arguments = raw_call.get("arguments") if isinstance(raw_call, dict) else None
+            args, error = self._parse_native_arguments(arguments)
+            if error:
+                errors.append(f"tool call {index} {error}")
+                continue
+
+            call: Dict[str, Any] = {"tool": name, "args": args}
+            call_id = str(raw_call.get("id") or "").strip() if isinstance(raw_call, dict) else ""
+            if call_id:
+                call["id"] = call_id
+            normalized.append(call)
+
+        if errors:
+            self._emit_event("Native tool call ignored: " + "; ".join(errors) + ".")
+        return normalized
+
+    def _parse_native_arguments(self, arguments: Any) -> tuple[Dict[str, Any], Optional[str]]:
+        if arguments is None or arguments == "":
+            return {}, None
+        if isinstance(arguments, dict):
+            return arguments, None
+        if not isinstance(arguments, str):
+            return {}, None
+
+        parsed = self._loads_json_candidate(arguments.strip())
+        if parsed is None:
+            return {}, "has invalid JSON arguments"
+        if not isinstance(parsed, dict):
+            return {}, "arguments must be a JSON object"
+        return parsed, None
+
+    def _build_system_prompt(self, native_tools: bool) -> str:
+        tool_schemas = json.dumps(self.tool_manager.describe_tools(), ensure_ascii=False, indent=2)
+        self._emit_tool_load_errors()
+
+        if native_tools:
+            response_rules = """
+## Response Rules:
+1. If you can answer directly, do so without calling tools.
+When a task requires a tool, invoke it through the provided function-calling interface (`tools`). Do not describe an action as completed unless the tool actually executed successfully. After receiving a tool result, continue the task. If no tool is needed, provide the final answer normally.
+2. Use object-style arguments that match the tool schema. Omit optional arguments you do not need.
+3. You may invoke several independent tools in one step.
+4. After receiving tool results, summarize them and conclude.
+5. Do not claim a tool succeeded unless the tool result says success is true.
+Never trust the tool's claim of success; verify the resulting state.
+"""
+        else:
+            response_rules = """
+## Response Rules:
+1. If you can answer directly, do so without calling tools.
+When a task requires a tool, call the appropriate tool directly. Do not describe an action as completed unless the tool actually executed successfully. Do not output simulated tool calls as ordinary text. After receiving a tool result, continue the task. If no tool is needed, provide the final answer normally.
+3. If you need tools, respond ONLY with this JSON object and no markdown:
+{"tool_calls":[{"tool":"tool_name","args":{"arg_name":"value"}}]}
+4. Use object-style args that match the tool schema. Use {} for tools with no arguments.
+5. After receiving tool results, summarize them and conclude.
+6. Do not claim a tool succeeded unless the tool result says success is true.
+Never trust the tool's claim of success; verify the resulting state.
+"""
+
+        return f"""
+You are Scout, a highly capable IT AI assistant with access to tools. You solve user requests by reasoning step-by-step and calling tools when needed.
+The assistant is running on a {platform.system()} machine.
+
+## Your Capabilities:
+- Think step by step before acting.
+- Explain your reasoning when you decide to call tools.
+- Make a plan if multiple steps or tools are needed, explain it to the  user and execute them iteratively.
+- You may call one or more tools per step.
+
+- Ask the user before high-risk actions unless the tool itself asks for confirmation.
+- Always return results to the user, integrating tool outputs into a final answer.
+Never trust the tool's claim of success; verify the resulting state.
+
+## Tool Selection Rules:
+- For managing software and packages (installing, removing, searching, checking apps), ALWAYS use `install_app`, `remove_app`, `search_packages`, and `check_app_installed`. Do NOT use `run_cmd` with `dnf`, `apt`, `pacman`, or `flatpak`.
+- For system diagnostics (checking disk space, network, failed services, updates), ALWAYS use dedicated diagnostic tools (`check_disk_space`, `check_network_status`, `check_failed_services`, `check_updates`) instead of raw shell commands.
+- Use `run_cmd` only when no specialized tool exists for the requested task.
+
+## Available Tools
+{tool_schemas}
+
+{response_rules}
+
+"""
+
+    async def _collect_streamed_response(self, stream) -> tuple[str, List[Dict[str, Any]]]:
+        """Accumulate a streamed response into (content, raw native tool calls)."""
         final_parts = []
         visible_parts = []
+        native_tool_calls: Dict[int, Dict[str, Any]] = {}
 
         async for chunk in stream:
             if not chunk.choices:
                 continue
 
-            delta = chunk.choices[0].delta
+            choice = chunk.choices[0]
+            delta = choice.delta
             reasoning = (
                 getattr(delta, "reasoning_content", None)
                 or getattr(delta, "reasoning", None)
             )
             content = getattr(delta, "content", None)
+
+            # Native tool-call fragments arrive as deltas keyed by index.
+            for tool_call_delta in getattr(delta, "tool_calls", None) or []:
+                index = getattr(tool_call_delta, "index", None)
+                if index is None:
+                    index = len(native_tool_calls)
+                entry = native_tool_calls.setdefault(index, {"id": "", "name": "", "arguments": ""})
+
+                if getattr(tool_call_delta, "id", None):
+                    entry["id"] = tool_call_delta.id
+                function_delta = getattr(tool_call_delta, "function", None)
+                if function_delta:
+                    if getattr(function_delta, "name", None):
+                        entry["name"] += function_delta.name
+                    if getattr(function_delta, "arguments", None):
+                        entry["arguments"] += function_delta.arguments
 
             if reasoning:
                 visible_parts.append(reasoning)
@@ -271,10 +432,11 @@ Never trust the tool's claim of success; verify the resulting state.
                 final_parts.append(content)
                 visible_parts.append(content)
 
-            if reasoning or content:
+            if reasoning or content or getattr(delta, "tool_calls", None):
                 self._emit_stream("".join(visible_parts))
 
-        return "".join(final_parts or visible_parts).strip()
+        ordered_tool_calls = [native_tool_calls[index] for index in sorted(native_tool_calls)]
+        return "".join(final_parts or visible_parts).strip(), ordered_tool_calls
 
     def _emit_stream(self, content: str) -> None:
         if self.stream_callback:
@@ -555,14 +717,56 @@ Never trust the tool's claim of success; verify the resulting state.
         }
 
 
+    def _add_native_assistant_message(self, content: str, tool_calls: List[Dict[str, Any]]) -> None:
+        """Store the assistant turn that requested tools, preserving native call IDs."""
+        message = {
+            "role": "assistant",
+            "content": content if isinstance(content, str) and content.strip() else None,
+            "tool_calls": [
+                {
+                    "id": call.get("id"),
+                    "type": "function",
+                    "function": {
+                        "name": call["tool"],
+                        "arguments": json.dumps(call.get("args", {}), ensure_ascii=False),
+                    },
+                }
+                for call in tool_calls
+            ],
+        }
+        self._append_message(message)
+
     def _add_tool_results_to_history(self, tool_calls: List[Dict[str, Any]], tool_results: List[Dict[str, Any]]):
-        self._add_message("assistant", json.dumps({"tool_calls": tool_calls}, ensure_ascii=False))
         failed_tools = [result for result in tool_results if not result.get("success", False)]
         self._tool_recovery_context = self._build_recovery_context(tool_calls, tool_results) if failed_tools else ""
-        self._add_message(
-            "user",
-            "Tool results:\n" + json.dumps(tool_results, ensure_ascii=False, indent=2),
-        )
+
+        if any(call.get("id") for call in tool_calls):
+            # Native function calling: attach each result to its tool_call ID.
+            compact_by_tool = {}
+            for call, result in zip(tool_calls, tool_results):
+                compact = {
+                    key: result[key]
+                    for key in ("success", "result", "error", "risk")
+                    if key in result
+                }
+                compact_by_tool.setdefault(str(call.get("id")), []).append(compact)
+
+            for call in tool_calls:
+                entries = compact_by_tool.get(str(call.get("id")), [])
+                payload = entries[0] if len(entries) == 1 else entries
+                self._append_message({
+                    "role": "tool",
+                    "tool_call_id": call.get("id"),
+                    "content": json.dumps(payload, ensure_ascii=False, indent=2),
+                })
+        else:
+            # Fallback JSON protocol: exchange results through plain text turns.
+            self._add_message("assistant", json.dumps({"tool_calls": tool_calls}, ensure_ascii=False))
+            self._add_message(
+                "user",
+                "Tool results:\n" + json.dumps(tool_results, ensure_ascii=False, indent=2),
+            )
+
         if failed_tools:
             self._emit_event("Tool failure detected. Recovery guidance added to the next model turn.")
 
@@ -590,10 +794,27 @@ Never trust the tool's claim of success; verify the resulting state.
             + json.dumps(failed_entries, ensure_ascii=False, indent=2)
         )
 
-    def _add_message(self, role: str, content: str) -> None:
-        self.conversation_history.append({"role": role, "content": content})
+    def _append_message(self, message: Dict[str, Any]) -> None:
+        self.conversation_history.append(message)
+        self._trim_history()
+
+    def _trim_history(self) -> None:
         if self.max_history_messages > 0 and len(self.conversation_history) > self.max_history_messages:
             self.conversation_history = self.conversation_history[-self.max_history_messages:]
+        # Never leave orphaned tool results or tool requests at the start of
+        # the history: OpenAI-compatible APIs reject a leading role="tool"
+        # message and an assistant turn whose tool replies were trimmed away.
+        while self.conversation_history and (
+            self.conversation_history[0].get("role") == "tool"
+            or (
+                self.conversation_history[0].get("role") == "assistant"
+                and self.conversation_history[0].get("tool_calls")
+            )
+        ):
+            self.conversation_history.pop(0)
+
+    def _add_message(self, role: str, content: str) -> None:
+        self._append_message({"role": role, "content": content})
 
     def _emit_event(self, message: str) -> None:
         if self.event_callback:
